@@ -1,0 +1,17 @@
+#!/usr/bin/env bpftrace
+/*
+ * Record page cache hit/miss behavior for agent workloads.
+ * Output format: timestamp,cpu,pid,step_id,event,pgoff
+ * 
+ * CSV Header: timestamp,cpu,pid,step_id,event,pgoff
+ */
+
+tracepoint:agent_latency:agent_pagecache_event
+{
+    $event = args->hit ? "hit" : "miss";
+    printf("%llu,%d,%d,%llu,%s,%lu\n", nsecs, args->cpu, args->pid, args->step_id, $event, args->pgoff);
+}
+
+/* Fallback for unpatched kernels:
+ * kprobe:filemap_get_folio { ... }
+ */

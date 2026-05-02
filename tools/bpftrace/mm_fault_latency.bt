@@ -1,0 +1,28 @@
+#!/usr/bin/env bpftrace
+/*
+ * Measure handle_mm_fault latency for agent workloads.
+ * Output format: timestamp,cpu,pid,address,latency_us
+ * 
+ * CSV Header: timestamp,cpu,pid,address,latency_us
+ */
+
+tracepoint:agent_latency:agent_mm_fault_begin
+/comm == "agent_loop"/
+{
+    @start[tid] = nsecs;
+    @addr[tid] = args->address;
+}
+
+tracepoint:agent_latency:agent_mm_fault_end
+/@start[tid]/
+{
+    $latency = (nsecs - @start[tid]) / 1000;
+    printf("%llu,%d,%d,%lx,%llu\n", nsecs, args->cpu, args->pid, @addr[tid], $latency);
+    delete(@start[tid]);
+    delete(@addr[tid]);
+}
+
+/* Fallback for unpatched kernels:
+ * tracepoint:exceptions:page_fault_user { @start[tid] = nsecs; }
+ * ... correlate with return if possible ...
+ */

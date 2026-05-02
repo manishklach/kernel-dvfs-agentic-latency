@@ -1,0 +1,202 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Manish KL <manish@example.com>
+Date: Sat, 2 May 2026 00:00:00 +0530
+Subject: [RFC PATCH 1/1] mm: add agent latency page-cache attribution
+
+Agent loops often stall on mmap/page-cache-backed data, such as local
+vector indexes, document caches, or model metadata. These "hidden"
+latency gates occur when a page fault triggers a slowpath or I/O.
+
+This patch adds experimental tracepoints to MM and the page cache to
+measure fault latency and hit/miss behavior for agent-tagged tasks.
+
+This RFC focuses on observability; no new madvise policy or eviction
+controls are implemented yet.
+
+Patch layout:
+  [1/4] mm: add agent latency tracepoints for page faults
+  [2/4] mm/filemap: add agent latency tracepoints for filemap faults
+  [3/4] docs: add mm-pagecache-attribution documentation
+  [4/4] tools: add bpftrace scripts for MM latency
+
+---
+ include/linux/sched/agent_latency.h  |  7 +++
+ include/trace/events/agent_latency.h | 86 ++++++++++++++++++++++++++++
+ mm/memory.c                         | 24 ++++++++
+ mm/filemap.c                        | 28 +++++++++
+ 4 files changed, 145 insertions(+)
+
+diff --git a/include/linux/sched/agent_latency.h b/include/linux/sched/agent_latency.h
+--- a/include/linux/sched/agent_latency.h
++++ b/include/linux/sched/agent_latency.h
+@@ -83,6 +83,13 @@ static inline u64 agent_step_from_user_data(u64 user_data)
+         return user_data >> 32;
+ }
+ 
++/* 
++ * RFC TODO: Evaluate MADV_AGENT_HOTSET / MADV_AGENT_SCAN for proactive 
++ * page-cache warming and eviction protection.
++ */
++#define MADV_AGENT_HOTSET 0x47
++#define MADV_AGENT_SCAN   0x48
++
+ #else
+diff --git a/include/trace/events/agent_latency.h b/include/trace/events/agent_latency.h
+--- a/include/trace/events/agent_latency.h
++++ b/include/trace/events/agent_latency.h
+@@ -256,6 +256,92 @@ TRACE_EVENT(agent_blk_rq_complete,
+                   __entry->cpu, __entry->rq, __entry->step_id, __entry->error, __entry->bytes)
+ );
+ 
++TRACE_EVENT(agent_mm_fault_begin,
++        TP_PROTO(unsigned long address, unsigned int flags),
++        TP_ARGS(address, flags),
++        TP_STRUCT__entry(
++                __field(int, cpu)
++                __field(pid_t, pid)
++                __field(unsigned long, address)
++                __field(unsigned int, flags)
++                __field(u64, step_id)
++        ),
++        TP_fast_assign(
++                __entry->cpu = smp_processor_id();
++                __entry->pid = current->pid;
++                __entry->address = address;
++                __entry->flags = flags;
++                __entry->step_id = task_agent_latency(current) ? current->agent_step_id : 0;
++        ),
++        TP_printk("cpu=%d pid=%d step_id=%llu address=%lx flags=%u",
++                  __entry->cpu, __entry->pid, __entry->step_id, __entry->address, __entry->flags)
++);
++
++TRACE_EVENT(agent_mm_fault_end,
++        TP_PROTO(unsigned long address, vm_fault_t ret),
++        TP_ARGS(address, ret),
++        TP_STRUCT__entry(
++                __field(int, cpu)
++                __field(pid_t, pid)
++                __field(unsigned long, address)
++                __field(vm_fault_t, ret)
++        ),
++        TP_fast_assign(
++                __entry->cpu = smp_processor_id();
++                __entry->pid = current->pid;
++                __entry->address = address;
++                __entry->ret = ret;
++        ),
++        TP_printk("cpu=%d pid=%d address=%lx ret=%u",
++                  __entry->cpu, __entry->pid, __entry->address, __entry->ret)
++);
++
++TRACE_EVENT(agent_filemap_fault,
++        TP_PROTO(struct vm_fault *vmf),
++        TP_ARGS(vmf),
++        TP_STRUCT__entry(
++                __field(int, cpu)
++                __field(pid_t, pid)
++                __field(unsigned long, address)
++                __field(pgoff_t, pgoff)
++                __field(u64, step_id)
++        ),
++        TP_fast_assign(
++                __entry->cpu = smp_processor_id();
++                __entry->pid = current->pid;
++                __entry->address = vmf->address;
++                __entry->pgoff = vmf->pgoff;
++                __entry->step_id = task_agent_latency(current) ? current->agent_step_id : 0;
++        ),
++        TP_printk("cpu=%d pid=%d step_id=%llu address=%lx pgoff=%lu",
++                  __entry->cpu, __entry->pid, __entry->step_id, __entry->address, __entry->pgoff)
++);
++
++TRACE_EVENT(agent_pagecache_event,
++        TP_PROTO(bool hit, pgoff_t pgoff),
++        TP_ARGS(hit, pgoff),
++        TP_STRUCT__entry(
++                __field(int, cpu)
++                __field(pid_t, pid)
++                __field(bool, hit)
++                __field(pgoff_t, pgoff)
++                __field(u64, step_id)
++        ),
++        TP_fast_assign(
++                __entry->cpu = smp_processor_id();
++                __entry->pid = current->pid;
++                __entry->hit = hit;
++                __entry->pgoff = pgoff;
++                __entry->step_id = task_agent_latency(current) ? current->agent_step_id : 0;
++        ),
++        TP_printk("cpu=%d pid=%d step_id=%llu hit=%d pgoff=%lu",
++                  __entry->cpu, __entry->pid, __entry->step_id, __entry->hit, __entry->pgoff)
++);
++
+ #endif
+diff --git a/mm/memory.c b/mm/memory.c
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -74,6 +74,11 @@
+ #include <linux/ptrace.h>
+ #include <linux/string_helpers.h>
+ 
++#ifdef CONFIG_AGENT_LATENCY
++#include <linux/sched/agent_latency.h>
++#include <trace/events/agent_latency.h>
++#endif
++
+@@ -4800,6 +4805,12 @@ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
+         vm_fault_t ret;
+ 
++#ifdef CONFIG_AGENT_LATENCY
++        if (task_agent_latency(current))
++                trace_agent_mm_fault_begin(address, flags);
++#endif
++
+         /* ... */
+ 
+         ret = __handle_mm_fault(vma, address, flags);
+ 
++#ifdef CONFIG_AGENT_LATENCY
++        if (task_agent_latency(current))
++                trace_agent_mm_fault_end(address, ret);
++#endif
++
+         return ret;
+ }
+diff --git a/mm/filemap.c b/mm/filemap.c
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -46,6 +46,11 @@
+ #include <linux/psi.h>
+ #include <linux/ramfs.h>
+ 
++#ifdef CONFIG_AGENT_LATENCY
++#include <linux/sched/agent_latency.h>
++#include <trace/events/agent_latency.h>
++#endif
++
+@@ -2800,6 +2805,23 @@ vm_fault_t filemap_fault(struct vm_fault *vmf)
+         struct file *file = vma->vm_file;
+         struct address_space *mapping = file->f_mapping;
+ 
++#ifdef CONFIG_AGENT_LATENCY
++        if (task_agent_latency(current))
++                trace_agent_filemap_fault(vmf);
++#endif
++
+         /* ... */
+ 
+         folio = filemap_get_folio(mapping, vmf->pgoff);
+         if (IS_ERR(folio)) {
++#ifdef CONFIG_AGENT_LATENCY
++                if (task_agent_latency(current))
++                        trace_agent_pagecache_event(false, vmf->pgoff);
++#endif
+                 /* ... */
+         } else {
++#ifdef CONFIG_AGENT_LATENCY
++                if (task_agent_latency(current))
++                        trace_agent_pagecache_event(true, vmf->pgoff);
++#endif
+                 /* ... */
+         }
+ 

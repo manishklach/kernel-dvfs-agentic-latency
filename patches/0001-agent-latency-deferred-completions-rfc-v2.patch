@@ -1,0 +1,268 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Manish KL <manish@example.com>
+Date: Sat, 2 May 2026 00:00:00 +0530
+Subject: [RFC PATCH v2 8-12/12] sched: agent-aware deferred completion windows
+
+Some agent-visible latency is not direct IRQ latency. It is deferred
+completion latency where execution bounces through a workqueue or timer
+callback before waking the agent thread.
+
+This RFC extension adds tracepoints with CPU and step_id propagation to
+attribute workqueues and hrtimers to agent loops. This v2 patch focuses
+strictly on correct, measurable correlation without enabling invasive
+policy yet.
+
+Changes in v2:
+- Add CPU field to all tracepoints for scheduling locality diagnosis.
+- Propagate current->agent_step_id when queuing/starting work.
+- Add new agent_completion_to_wakeup tracepoint in try_to_wake_up().
+- Clean up agent_work_ctx with clear RFC placeholder comments.
+- Keep DVFS refresh logic disabled with TODOs for future evaluation.
+
+Patch layout:
+  [8/12] workqueue: add agent latency tracepoints for queued work
+  [9/12] workqueue: add optional agent_step_id attribution helpers
+  [10/12] timer/hrtimer: trace agent timer expiry-to-wakeup latency
+  [11/12] sched: refresh agent DVFS window from deferred completions
+  [12/12] tools: add bpftrace scripts for workqueue and timer latency
+
+---
+ include/linux/sched/agent_latency.h      | 23 +++++++
+ include/trace/events/agent_latency.h     | 95 ++++++++++++++++++++++++++++
+ kernel/sched/core.c                      | 26 ++++++++
+ kernel/time/hrtimer.c                    | 18 ++++++
+ kernel/workqueue.c                       | 32 ++++++++++
+ 5 files changed, 194 insertions(+)
+
+diff --git a/include/linux/sched/agent_latency.h b/include/linux/sched/agent_latency.h
+--- a/include/linux/sched/agent_latency.h
++++ b/include/linux/sched/agent_latency.h
+@@ -52,6 +52,29 @@ static inline void task_agent_refresh_window(struct rq *rq,
+                 p->agent_window_ns ?: AGENT_LATENCY_DEFAULT_WINDOW_NS);
+ }
+ 
++/* 
++ * RFC Placeholder: Minimal metadata for workqueue attribution.
++ * Defined but currently unused. A production implementation requires this
++ * to be a BPF map or explicitly embedded inside struct work_struct.
++ */
++struct agent_work_ctx {
++        struct work_struct *work;
++        u64 agent_step_id;
++        unsigned int min_util;
++};
++
++/* Helper to refresh the window from asynchronous contexts (SoftIRQ/kworker) */
++static inline void rq_agent_refresh_from_deferred(struct rq *rq, u64 step_id)
++{
++        /* 
++         * TODO: Evaluate deferred completion as signal for DVFS window refresh.
++         * Provide a short burst window to bridge the gap between 
++         * the kworker/timer and the actual agent task wakeup.
++         */
++        /* rq_agent_refresh_window(rq, AGENT_LATENCY_DEFAULT_MIN_UTIL, 
++                                   AGENT_LATENCY_DEFAULT_WINDOW_NS / 2); */
++}
++
+ #else
+diff --git a/include/trace/events/agent_latency.h b/include/trace/events/agent_latency.h
+--- a/include/trace/events/agent_latency.h
++++ b/include/trace/events/agent_latency.h
+@@ -66,6 +66,101 @@ TRACE_EVENT(agent_cpuidle_guard,
+                   __entry->selected_state, __entry->limit_us)
+ );
+ 
++TRACE_EVENT(agent_workqueue_queue,
++        TP_PROTO(struct work_struct *work, u64 step_id),
++        TP_ARGS(work, step_id),
++        TP_STRUCT__entry(
++                __field(int, cpu)
++                __field(void *, work)
++                __field(u64, step_id)
++        ),
++        TP_fast_assign(
++                __entry->cpu = smp_processor_id();
++                __entry->work = work;
++                __entry->step_id = step_id;
++        ),
++        TP_printk("cpu=%d work=%p step=%llu", __entry->cpu, __entry->work, __entry->step_id)
++);
++
++TRACE_EVENT(agent_workqueue_start,
++        TP_PROTO(struct work_struct *work, u64 step_id),
++        TP_ARGS(work, step_id),
++        TP_STRUCT__entry(
++                __field(int, cpu)
++                __field(void *, work)
++                __field(u64, step_id)
++        ),
++        TP_fast_assign(
++                __entry->cpu = smp_processor_id();
++                __entry->work = work;
++                __entry->step_id = step_id;
++        ),
++        TP_printk("cpu=%d work=%p step=%llu", __entry->cpu, __entry->work, __entry->step_id)
++);
++
++TRACE_EVENT(agent_workqueue_finish,
++        TP_PROTO(struct work_struct *work),
++        TP_ARGS(work),
++        TP_STRUCT__entry(
++                __field(int, cpu)
++                __field(void *, work)
++        ),
++        TP_fast_assign(
++                __entry->cpu = smp_processor_id();
++                __entry->work = work;
++        ),
++        TP_printk("cpu=%d work=%p", __entry->cpu, __entry->work)
++);
++
++TRACE_EVENT(agent_timer_expire,
++        TP_PROTO(void *timer),
++        TP_ARGS(timer),
++        TP_STRUCT__entry(
++                __field(int, cpu)
++                __field(void *, timer)
++        ),
++        TP_fast_assign(
++                __entry->cpu = smp_processor_id();
++                __entry->timer = timer;
++        ),
++        TP_printk("cpu=%d timer=%p", __entry->cpu, __entry->timer)
++);
++
++TRACE_EVENT(agent_timer_wakeup,
++        TP_PROTO(void *timer, pid_t pid),
++        TP_ARGS(timer, pid),
++        TP_STRUCT__entry(
++                __field(int, cpu)
++                __field(void *, timer)
++                __field(pid_t, pid)
++        ),
++        TP_fast_assign(
++                __entry->cpu = smp_processor_id();
++                __entry->timer = timer;
++                __entry->pid = pid;
++        ),
++        TP_printk("cpu=%d timer=%p woke_pid=%d", __entry->cpu, __entry->timer, __entry->pid)
++);
++
++TRACE_EVENT(agent_completion_to_wakeup,
++        TP_PROTO(void *obj, pid_t pid),
++        TP_ARGS(obj, pid),
++        TP_STRUCT__entry(
++                __field(int, cpu)
++                __field(void *, obj)
++                __field(pid_t, pid)
++        ),
++        TP_fast_assign(
++                __entry->cpu = smp_processor_id();
++                __entry->obj = obj;
++                __entry->pid = pid;
++        ),
++        TP_printk("cpu=%d obj=%p woke_pid=%d", __entry->cpu, __entry->obj, __entry->pid)
++);
++
+ #endif
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -3840,6 +3862,13 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
+         success = 1;
+ 
+ #ifdef CONFIG_AGENT_LATENCY
++        /* 
++         * RFC: Record exact time of agent wakeup to correlate with 
++         * preceding deferred completions.
++         */
++        if (task_agent_latency(p))
++                trace_agent_completion_to_wakeup(current, task_pid_nr(p));
++
+         if (task_agent_latency(p)) {
+                 struct rq *rq = cpu_rq(task_cpu(p));
+ 
+diff --git a/kernel/workqueue.c b/kernel/workqueue.c
+--- a/kernel/workqueue.c
++++ b/kernel/workqueue.c
+@@ -50,6 +50,11 @@
+ #include <linux/nmi.h>
+ #include <linux/kvm_para.h>
+ 
++#ifdef CONFIG_AGENT_LATENCY
++#include <linux/sched/agent_latency.h>
++#include <trace/events/agent_latency.h>
++#endif
++
+@@ -1500,6 +1504,15 @@ static void __queue_work(int cpu, struct workqueue_struct *wq,
+         /* ... existing code ... */
+         insert_work(pwq, work, worklist, work_flags);
+ 
++#ifdef CONFIG_AGENT_LATENCY
++        /* RFC: Record tracepoint when a known agent context queues work */
++        {
++                u64 step_id = task_agent_latency(current) ? current->agent_step_id : 0;
++                trace_agent_workqueue_queue(work, step_id);
++        }
++#endif
++
+ out:
+         rcu_read_unlock();
+ }
+@@ -2340,6 +2349,15 @@ static void process_one_work(struct worker *worker, struct work_struct *work)
+         worker->current_work = work;
+         worker->current_func = work->func;
+ 
++#ifdef CONFIG_AGENT_LATENCY
++        {
++                u64 step_id = task_agent_latency(current) ? current->agent_step_id : 0;
++                trace_agent_workqueue_start(work, step_id);
++                /* TODO: Evaluate deferred completion as signal for DVFS window refresh */
++                /* rq_agent_refresh_from_deferred(cpu_rq(worker->cpu), step_id); */
++        }
++#endif
++
+         /* ... */
+         worker->current_func(work);
+         /* ... */
+ 
++#ifdef CONFIG_AGENT_LATENCY
++        trace_agent_workqueue_finish(work);
++#endif
+ }
+diff --git a/kernel/time/hrtimer.c b/kernel/time/hrtimer.c
+--- a/kernel/time/hrtimer.c
++++ b/kernel/time/hrtimer.c
+@@ -50,6 +50,10 @@
+ #include <linux/err.h>
+ #include <linux/debugobjects.h>
+ 
++#ifdef CONFIG_AGENT_LATENCY
++#include <trace/events/agent_latency.h>
++#endif
++
+@@ -1500,6 +1504,13 @@ static void __run_hrtimer(struct hrtimer_cpu_base *cpu_base,
+         trace_hrtimer_expire_entry(timer, now);
+ 
++#ifdef CONFIG_AGENT_LATENCY
++        /* RFC: Note timer expiration for correlation with agent wakeups */
++        trace_agent_timer_expire(timer);
++        /* TODO: Evaluate deferred completion as signal for DVFS window refresh */
++        /* rq_agent_refresh_from_deferred(cpu_rq(smp_processor_id()), 0); */
++#endif
++
+         restart = fn(timer);
+@@ -1900,6 +1904,10 @@ static enum hrtimer_restart hrtimer_wakeup(struct hrtimer *timer)
+ {
+         struct hrtimer_sleeper *t =
+                 container_of(timer, struct hrtimer_sleeper, timer);
+         struct task_struct *task = t->task;
+ 
+         t->task = NULL;
+         if (task) {
++#ifdef CONFIG_AGENT_LATENCY
++                trace_agent_timer_wakeup(timer, task_pid_nr(task));
++#endif
+                 wake_up_process(task);
+         }
+ 

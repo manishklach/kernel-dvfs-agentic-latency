@@ -18,12 +18,14 @@ Timers (`hrtimers`) often gate retry logic, timeouts, and tight polling loops.
 * **The Problem**: Timer expiry is handled in SoftIRQ context. The timer interrupt wakes the CPU, but the timer callback must execute before the agent is woken. 
 * **Control Plane Extension**: When an agent's timer expires, the SoftIRQ context can refresh the agent latency window immediately, ensuring the core stays warm while transitioning from the timer callback back to userspace.
 
-## Phase 2 Tracepoints
-We introduce new experimental tracepoints to observe deferred context delays without heavy task-struct modifications:
-* `agent_workqueue_queue`: Fires when work is queued for an agent.
-* `agent_workqueue_start` / `agent_workqueue_finish`: Bounds the execution of the `kworker`.
+## Phase 2 Tracepoints & Correlation
+We introduce new experimental tracepoints to observe deferred context delays and build high-fidelity correlation mappings. A key addition is tracking execution locality across CPUs and tracking the propagation of the `agent_step_id`:
+
+* `agent_workqueue_queue`: Fires when work is queued for an agent, propagating the `current->agent_step_id` if the caller is an agent loop.
+* `agent_workqueue_start` / `agent_workqueue_finish`: Bounds the execution of the `kworker`. Correlates `step_id` and tracks the specific execution `cpu`.
 * `agent_timer_expire`: Fires when an attributed timer begins execution.
-* `agent_timer_wakeup`: Fires when the timer successfully wakes the agent.
+* `agent_timer_wakeup`: Fires when the timer successfully wakes the agent, allowing measurement of the timer_expire → wakeup latency.
+* `agent_completion_to_wakeup`: This is a critical hook placed near `try_to_wake_up()` that measures the precise time delta between a completion event (workqueue execution or timer expiry) and the task actually being placed onto the runqueue.
 
 ## Measuring Deferred Latency
 Use the provided `bpftrace` scripts to analyze these paths:

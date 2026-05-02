@@ -1,0 +1,27 @@
+#!/usr/bin/env bpftrace
+/*
+ * Monitor agent latency token bucket and degradation.
+ * Output format: timestamp,cpu,pid,tokens,degraded
+ * 
+ * CSV Header: timestamp,cpu,pid,tokens,degraded
+ */
+
+tracepoint:agent_latency:agent_cgrp_tokens
+{
+    printf("%llu,%d,%d,%llu,%d\n", nsecs, args->cpu, args->pid, args->tokens, args->degraded);
+}
+
+tracepoint:agent_latency:agent_cgrp_degrade
+{
+    $state = args->starting ? "DEGRADED_START" : "DEGRADED_STOP";
+    printf("%llu,%d,%d,%s,0\n", nsecs, args->cpu, args->pid, $state);
+}
+
+tracepoint:agent_latency:agent_cgrp_refill
+{
+    printf("%llu,%d,0,REFILL,%llu\n", nsecs, args->cpu, args->total);
+}
+
+/* Fallback for unpatched kernels:
+ * Budgeting is a custom RFC feature and has no direct unpatched equivalent.
+ */

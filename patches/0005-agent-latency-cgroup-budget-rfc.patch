@@ -1,0 +1,193 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Manish KL <manish@example.com>
+Date: Sat, 2 May 2026 00:00:00 +0530
+Subject: [RFC PATCH 1/1] cgroup: add agent latency token-bucket budgeting
+
+The agent latency control plane allows tasks to override standard power
+management and scheduler fairness to ensure tight control-loop timing.
+To prevent abuse and maintain system-wide efficiency, this behavior must
+be budgeted.
+
+This patch implements a simple token-bucket mechanism at the cgroup level.
+Each cgroup is assigned a latency budget (refill rate and cost per step).
+If a cgroup's budget is exhausted, the agent latency mechanisms (DVFS
+boosts, cpuidle guards) are degraded until the bucket refills.
+
+Patch layout:
+  [1/4] include/linux/sched/agent_latency.h: define budget structures
+  [2/4] kernel/sched/core.c: implement token bucket refill and debit
+  [3/4] docs: add cgroup-latency-budget documentation
+  [4/4] tools: add bpftrace script for budget monitoring
+
+---
+ include/linux/sched/agent_latency.h  | 25 ++++++++++++
+ include/trace/events/agent_latency.h | 63 +++++++++++++++++++++++++++++
+ kernel/sched/core.c                  | 65 ++++++++++++++++++++++++++++++
+ 3 files changed, 153 insertions(+)
+
+diff --git a/include/linux/sched/agent_latency.h b/include/linux/sched/agent_latency.h
+--- a/include/linux/sched/agent_latency.h
++++ b/include/linux/sched/agent_latency.h
+@@ -93,6 +93,31 @@ static inline u64 agent_step_from_user_data(u64 user_data)
+ /* RFC TODO: Evaluate dentry cache pinning or path-lookup batching hints */
+ #define LOOKUP_AGENT_LATENCY 0x01000000
+ 
++/*
++ * Simple token bucket for cgroup-level latency budgeting.
++ * RFC: For simplicity, we define this globally or attach to task_group.
++ */
++struct agent_latency_budget {
++        u64 tokens;
++        u64 last_refill_ns;
++        u32 refill_rate;  /* tokens per ms */
++        u32 cost_per_step;
++        bool degraded;
++};
++
++#ifdef CONFIG_CGROUPS
++/* 
++ * RFC: In a production patch, this would be inside struct task_group.
++ * For this research RFC, we use a simplified per-cgroup lookup.
++ */
++extern bool agent_cgrp_budget_check(struct task_struct *p);
++extern void agent_cgrp_budget_debit(struct task_struct *p);
++#else
++static inline bool agent_cgrp_budget_check(struct task_struct *p) { return true; }
++static inline void agent_cgrp_budget_debit(struct task_struct *p) { }
++#endif
++
+ #else
+diff --git a/include/trace/events/agent_latency.h b/include/trace/events/agent_latency.h
+--- a/include/trace/events/agent_latency.h
++++ b/include/trace/events/agent_latency.h
+@@ -467,6 +467,69 @@ TRACE_EVENT(agent_dentry_cache_event,
+                   __entry->cpu, __entry->pid, __entry->step_id, __entry->hit, __entry->dentry)
+ );
+ 
++TRACE_EVENT(agent_cgrp_tokens,
++        TP_PROTO(u64 tokens, bool degraded),
++        TP_ARGS(tokens, degraded),
++        TP_STRUCT__entry(
++                __field(int, cpu)
++                __field(pid_t, pid)
++                __field(u64, tokens)
++                __field(bool, degraded)
++        ),
++        TP_fast_assign(
++                __entry->cpu = smp_processor_id();
++                __entry->pid = current->pid;
++                __entry->tokens = tokens;
++                __entry->degraded = degraded;
++        ),
++        TP_printk("cpu=%d pid=%d tokens=%llu degraded=%d",
++                  __entry->cpu, __entry->pid, __entry->tokens, __entry->degraded)
++);
++
++TRACE_EVENT(agent_cgrp_degrade,
++        TP_PROTO(bool starting),
++        TP_ARGS(starting),
++        TP_STRUCT__entry(
++                __field(int, cpu)
++                __field(pid_t, pid)
++                __field(bool, starting)
++        ),
++        TP_fast_assign(
++                __entry->cpu = smp_processor_id();
++                __entry->pid = current->pid;
++                __entry->starting = starting;
++        ),
++        TP_printk("cpu=%d pid=%d degrade=%s",
++                  __entry->cpu, __entry->pid, __entry->starting ? "START" : "STOP")
++);
++
++TRACE_EVENT(agent_cgrp_refill,
++        TP_PROTO(u64 tokens_added, u64 new_total),
++        TP_ARGS(tokens_added, new_total),
++        TP_STRUCT__entry(
++                __field(int, cpu)
++                __field(u64, added)
++                __field(u64, total)
++        ),
++        TP_fast_assign(
++                __entry->cpu = smp_processor_id();
++                __entry->added = tokens_added;
++                __entry->total = new_total;
++        ),
++        TP_printk("cpu=%d added=%llu total=%llu", __entry->cpu, __entry->added, __entry->total)
++);
++
+ #endif
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -100,6 +100,71 @@
+ #include <linux/sched/agent_latency.h>
+ #include <trace/events/agent_latency.h>
+ #endif
++
++#ifdef CONFIG_AGENT_LATENCY
++/* RFC: Simplified global/cgroup budget state for research demonstration */
++static struct agent_latency_budget rfc_global_budget = {
++        .tokens = 1000,
++        .last_refill_ns = 0,
++        .refill_rate = 100, /* 100 tokens per ms */
++        .cost_per_step = 10,
++        .degraded = false,
++};
++
++bool agent_cgrp_budget_check(struct task_struct *p)
++{
++        u64 now = ktime_get_ns();
++        u64 delta_ns = now - rfc_global_budget.last_refill_ns;
++        u64 refill = (delta_ns * rfc_global_budget.refill_rate) / NSEC_PER_MSEC;
++
++        if (refill > 0) {
++                rfc_global_budget.tokens += refill;
++                if (rfc_global_budget.tokens > 5000)
++                        rfc_global_budget.tokens = 5000;
++                rfc_global_budget.last_refill_ns = now;
++                trace_agent_cgrp_refill(refill, rfc_global_budget.tokens);
++
++                if (rfc_global_budget.degraded && rfc_global_budget.tokens > 500) {
++                        rfc_global_budget.degraded = false;
++                        trace_agent_cgrp_degrade(false);
++                }
++        }
++
++        trace_agent_cgrp_tokens(rfc_global_budget.tokens, rfc_global_budget.degraded);
++        return !rfc_global_budget.degraded;
++}
++
++void agent_cgrp_budget_debit(struct task_struct *p)
++{
++        if (rfc_global_budget.tokens >= rfc_global_budget.cost_per_step) {
++                rfc_global_budget.tokens -= rfc_global_budget.cost_per_step;
++        } else {
++                rfc_global_budget.tokens = 0;
++                if (!rfc_global_budget.degraded) {
++                        rfc_global_budget.degraded = true;
++                        trace_agent_cgrp_degrade(true);
++                }
++        }
++}
++
++/* 
++ * Modified rq_agent_refresh to respect budget.
++ * Hooked into task wakeup path.
++ */
++void rq_agent_refresh(struct rq *rq, struct task_struct *p)
++{
++        if (!agent_cgrp_budget_check(p)) {
++                /* DEGRADED: do not refresh the active window */
++                return;
++        }
++
++        agent_cgrp_budget_debit(p);
++
++        /* Refresh the window as normal */
++        rq->agent_active_until = ktime_get_ns() + AGENT_LATENCY_DEFAULT_WINDOW_NS;
++        rq->agent_active_step_id = p->agent_step_id;
++}
++#endif
+ 
+ /* ... */

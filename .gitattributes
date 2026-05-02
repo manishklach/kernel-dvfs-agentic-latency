@@ -1,0 +1,14 @@
+# GitHub Language Detection Overrides
+# This repository is a Linux kernel research project (C / patches).
+# We want to ensure C shows as the primary language.
+
+# Mark Python post-processing tools as documentation/utilities so they don't dominate the language bar.
+tools/postprocess/*.py linguist-documentation
+
+# Ensure eBPF scripts are counted as code (often categorized as C-like).
+tools/bpftrace/*.bt linguist-language=C
+
+# Markdown and SVG are already ignored by default, but let's be explicit if needed.
+docs/*.md linguist-documentation
+diagrams/*.svg linguist-documentation
+patches/*.patch linguist-documentation

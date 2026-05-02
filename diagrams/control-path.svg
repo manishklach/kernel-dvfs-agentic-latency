@@ -1,52 +1,37 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 250">
+<svg width="600" height="400" viewBox="0 0 600 400" xmlns="http://www.w3.org/2000/svg">
+  <rect width="600" height="400" fill="#fdfdfd" rx="10"/>
+  <style>
+    .text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 14px; fill: #333; }
+    .label { font-weight: 600; text-anchor: middle; }
+    .box { fill: #fff; stroke: #ddd; stroke-width: 1.5; rx: 6; }
+    .arrow { stroke: #aaa; stroke-width: 1.5; fill: none; }
+    .highlight { fill: #f0f7ff; stroke: #007aff; }
+  </style>
+  
+  <g transform="translate(100, 20)">
+    <rect x="0" y="0" width="400" height="60" class="box" />
+    <text x="200" y="35" class="text label">IRQ / Timer / Workqueue / I/O / MM / VFS</text>
+    
+    <path d="M 200 60 V 90" class="arrow" marker-end="url(#arrowhead)"/>
+    <rect x="125" y="90" width="150" height="40" class="box highlight" />
+    <text x="200" y="115" class="text label">Completion</text>
+    
+    <path d="M 200 130 V 160" class="arrow" marker-end="url(#arrowhead)"/>
+    <rect x="125" y="160" width="150" height="40" class="box highlight" />
+    <text x="200" y="185" class="text label">Scheduler</text>
+    
+    <path d="M 200 200 V 230" class="arrow" marker-end="url(#arrowhead)"/>
+    <rect x="125" y="230" width="150" height="40" class="box highlight" />
+    <text x="200" y="255" class="text label">DVFS / cpuidle</text>
+    
+    <path d="M 200 270 V 300" class="arrow" marker-end="url(#arrowhead)"/>
+    <rect x="125" y="300" width="150" height="40" class="box" />
+    <text x="200" y="325" class="text label">Userspace Agent</text>
+  </g>
+  
   <defs>
-    <style>
-      .box { fill: #f8fafc; stroke: #334155; stroke-width: 2; rx: 8; }
-      .text { font-family: -apple-system, system-ui, sans-serif; font-size: 14px; fill: #0f172a; text-anchor: middle; font-weight: 500; }
-      .title { font-family: -apple-system, system-ui, sans-serif; font-size: 12px; fill: #64748b; text-anchor: middle; }
-      .arrow { stroke: #3b82f6; stroke-width: 2; fill: none; }
-      .arrowhead { fill: #3b82f6; }
-      .deferred { fill: #fef3c7; stroke: #d97706; stroke-dasharray: 4; }
-    </style>
-    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" class="arrowhead" />
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="0" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#aaa" />
     </marker>
   </defs>
-
-  <rect x="20" y="50" width="100" height="60" class="box" />
-  <text x="70" y="85" class="text">IRQ / Timer</text>
-  <text x="70" y="100" class="title">Hardware</text>
-
-  <path d="M 120 80 L 150 80" class="arrow" marker-end="url(#arrow)" />
-
-  <rect x="160" y="50" width="110" height="60" class="box deferred" />
-  <text x="215" y="85" class="text">Workqueue</text>
-  <text x="215" y="100" class="title">Deferred Context</text>
-
-  <path d="M 270 80 L 300 80" class="arrow" marker-end="url(#arrow)" />
-
-  <rect x="310" y="50" width="100" height="60" class="box" />
-  <text x="360" y="85" class="text">Wakeup</text>
-  <text x="360" y="100" class="title">try_to_wake_up</text>
-
-  <path d="M 410 80 L 440 80" class="arrow" marker-end="url(#arrow)" />
-
-  <rect x="450" y="50" width="110" height="60" class="box" />
-  <text x="505" y="85" class="text">Scheduler</text>
-  <text x="505" y="100" class="title">Agent Window</text>
-
-  <path d="M 560 80 L 590 80" class="arrow" marker-end="url(#arrow)" />
-
-  <rect x="600" y="50" width="100" height="60" class="box" />
-  <text x="650" y="85" class="text">DVFS</text>
-  <text x="650" y="100" class="title">schedutil min</text>
-
-  <path d="M 700 80 L 730 80" class="arrow" marker-end="url(#arrow)" />
-
-  <rect x="740" y="50" width="100" height="60" class="box" />
-  <text x="790" y="85" class="text">cpuidle</text>
-  <text x="790" y="100" class="title">C-state guard</text>
-  
-  <path d="M 120 130 Q 215 180 310 130" class="arrow" marker-end="url(#arrow)" stroke-dasharray="4" />
-  <text x="215" y="160" class="title">Direct Fast Path</text>
 </svg>

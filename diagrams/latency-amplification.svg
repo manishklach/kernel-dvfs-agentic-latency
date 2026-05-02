@@ -1,0 +1,35 @@
+<svg width="600" height="200" viewBox="0 0 600 200" xmlns="http://www.w3.org/2000/svg">
+  <rect width="600" height="200" fill="#fdfdfd" rx="10"/>
+  <style>
+    .text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 12px; fill: #666; }
+    .bar { fill: #e5e5e5; rx: 4; }
+    .active { fill: #007aff; }
+    .wait { fill: #ff3b30; }
+    .ramp { fill: #ffcc00; }
+  </style>
+  
+  <text x="20" y="30" class="text" style="font-weight: 600; font-size: 14px; fill: #333;">Latency Amplification Timeline</text>
+  
+  <rect x="20" y="60" width="60" height="20" class="bar active" />
+  <text x="20" y="95" class="text">Compute</text>
+  
+  <rect x="80" y="60" width="100" height="20" class="bar wait" />
+  <text x="80" y="95" class="text">Idle Exit Latency</text>
+  
+  <rect x="180" y="60" width="40" height="20" class="bar ramp" />
+  <text x="180" y="110" class="text">DVFS Ramp</text>
+  
+  <rect x="220" y="60" width="60" height="20" class="bar active" />
+  <text x="220" y="95" class="text">Compute</text>
+  
+  <rect x="280" y="60" width="100" height="20" class="bar wait" />
+  <text x="280" y="95" class="text">Idle Exit Latency</text>
+  
+  <rect x="380" y="60" width="40" height="20" class="bar ramp" />
+  <text x="380" y="110" class="text">DVFS Ramp</text>
+  
+  <rect x="420" y="60" width="60" height="20" class="bar active" />
+  <text x="420" y="95" class="text">Compute</text>
+  
+  <text x="20" y="160" class="text" style="fill: #999;">The "Wait → Wake → Compute" loop repeatedly incurs penalty at every step.</text>
+</svg>

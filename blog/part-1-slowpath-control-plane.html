@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agentic AI and the Linux Kernel — Part 1: The Slowpath Control Plane</title>
+    <style>
+        :root {
+            --bg: #ffffff;
+            --text: #1d1d1f;
+            --link: #0066cc;
+            --code-bg: #f5f5f7;
+            --border: #d2d2d7;
+            --highlight: #007aff;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #1d1d1f;
+                --text: #f5f5f7;
+                --link: #409fff;
+                --code-bg: #2d2d2f;
+                --border: #424245;
+            }
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: var(--text);
+            background-color: var(--bg);
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+        h1, h2, h3 { font-weight: 600; letter-spacing: -0.02em; }
+        h1 { font-size: 40px; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+        h2 { font-size: 28px; margin-top: 40px; }
+        a { color: var(--link); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace; background: var(--code-bg); padding: 2px 4px; border-radius: 4px; font-size: 0.9em; }
+        pre { background: var(--code-bg); padding: 20px; border-radius: 8px; overflow-x: auto; border: 1px solid var(--border); }
+        pre code { background: none; padding: 0; }
+        .diagram { margin: 40px 0; border: 1px solid var(--border); border-radius: 12px; padding: 20px; background: #fdfdfd; }
+        .diagram.dark-invert { filter: none; }
+        @media (prefers-color-scheme: dark) {
+            .diagram { background: #f5f5f7; }
+        }
+        .thesis { border-left: 4px solid var(--highlight); padding: 20px; background: var(--code-bg); margin: 30px 0; font-style: italic; }
+        footer { margin-top: 60px; padding-top: 20px; border-top: 1px solid var(--border); font-size: 0.9em; color: #86868b; }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>Agentic AI and the Linux Kernel</h1>
+    <p><strong>Part 1: The Slowpath Control Plane</strong></p>
+    <p><small>Published May 2, 2026 • By Manish KL</small></p>
+</header>
+
+<section>
+    <p>Modern Linux systems are optimized for two extremes: high-throughput batch processing and ultra-low-latency real-time interrupts. However, a new class of workload—<strong>Agentic AI</strong>—is exposing a fundamental gap in the kernel's architecture.</p>
+    
+    <div class="thesis">
+        "Agentic AI workloads repeatedly hit the 'hidden' slowpaths of the kernel. The cumulative latency of thousands of short transitions is the primary bottleneck for agentic reasoning loops."
+    </div>
+
+    <h2>The Problem: Reactive Impedance</h2>
+    <p>AI agents (coding bots, retrieval systems, robotic controllers) don't run as steady-state streams. They run in tight loops: <code>Wait → Wake → Compute → Repeat</code>. Each "compute" step might only last a few milliseconds, followed by a block on I/O, a timer, or a lock.</p>
+    
+    <p>Linux power management and scheduling are <strong>reactive</strong>. When an agent blocks, the kernel sees a drop in utilization and immediately tries to save power by downclocking the CPU (DVFS) or entering a deep sleep state (cpuidle). When the next step triggers, the agent must pay a "startup tax" to wake up, ramp the frequency, and exit idle.</p>
+
+    <div class="diagram">
+        <svg width="100%" height="auto" viewBox="0 0 600 200" xmlns="http://www.w3.org/2000/svg">
+          <style> .text { font-family: sans-serif; font-size: 12px; fill: #666; } .bar { fill: #e5e5e5; rx: 4; } .active { fill: #007aff; } .wait { fill: #ff3b30; } .ramp { fill: #ffcc00; } </style>
+          <text x="20" y="30" class="text" style="font-weight: 600; font-size: 14px; fill: #333;">Latency Amplification Timeline</text>
+          <rect x="20" y="60" width="60" height="20" class="bar active" /><text x="20" y="95" class="text">Compute</text>
+          <rect x="80" y="60" width="100" height="20" class="bar wait" /><text x="80" y="95" class="text">Idle Exit</text>
+          <rect x="180" y="60" width="40" height="20" class="bar ramp" /><text x="180" y="110" class="text">DVFS Ramp</text>
+          <rect x="220" y="60" width="60" height="20" class="bar active" /><text x="220" y="95" class="text">Compute</text>
+          <rect x="280" y="60" width="100" height="20" class="bar wait" /><text x="280" y="95" class="text">Idle Exit</text>
+          <rect x="380" y="60" width="40" height="20" class="bar ramp" /><text x="380" y="110" class="text">DVFS Ramp</text>
+          <rect x="420" y="60" width="60" height="20" class="bar active" />
+        </svg>
+    </div>
+
+    <p>In a complex agentic workflow involving 10,000 steps, this <strong>latency amplification</strong> can account for 20–40% of the total wall-clock time. This is not a "tuning" problem; it is a control plane problem.</p>
+
+    <h2>The Slowpath Control Plane</h2>
+    <p>Our research proposes a cross-subsystem <strong>Slowpath Control Plane</strong>. Instead of treating DVFS, scheduling, and I/O as independent actors, we introduce a unified "Agent Latency Window." When an agent task is active, the kernel applies a predictive guard across the entire execution path.</p>
+
+    <div class="diagram">
+        <svg width="100%" height="auto" viewBox="0 0 600 400" xmlns="http://www.w3.org/2000/svg">
+          <style> .text { font-family: sans-serif; font-size: 14px; fill: #333; } .label { font-weight: 600; text-anchor: middle; } .box { fill: #fff; stroke: #ddd; stroke-width: 1.5; rx: 6; } .arrow { stroke: #aaa; stroke-width: 1.5; fill: none; } .highlight { fill: #f0f7ff; stroke: #007aff; } </style>
+          <g transform="translate(100, 20)">
+            <rect x="0" y="0" width="400" height="60" class="box" /><text x="200" y="35" class="text label">IRQ / Timer / Workqueue / I/O / MM / VFS</text>
+            <path d="M 200 60 V 90" class="arrow" /><rect x="125" y="90" width="150" height="40" class="box highlight" /><text x="200" y="115" class="text label">Completion</text>
+            <path d="M 200 130 V 160" class="arrow" /><rect x="125" y="160" width="150" height="40" class="box highlight" /><text x="200" y="185" class="text label">Scheduler</text>
+            <path d="M 200 200 V 230" class="arrow" /><rect x="125" y="230" width="150" height="40" class="box highlight" /><text x="200" y="255" class="text label">DVFS / cpuidle</text>
+            <path d="M 200 270 V 300" class="arrow" /><rect x="125" y="300" width="150" height="40" class="box" /><text x="200" y="325" class="text label">Userspace Agent</text>
+          </g>
+        </svg>
+    </div>
+
+    <h3>1. Power & Scheduling (0000)</h3>
+    <p>We introduce <code>SCHED_FLAG_AGENT_LATENCY</code>. When set, the runqueue tracks an "active window." If a wakeup occurs within this window, the CPU is immediately boosted to its maximum frequency, and the idle governor is blocked from entering deep states. This eliminates the "startup tax."</p>
+
+    <h3>2. Deferred Completions (0001)</h3>
+    <p>Often, an agent isn't woken up by a hardware IRQ, but by a <code>kworker</code> thread or a SoftIRQ timer. We instrument these deferred paths to inherit the agent's latency requirements, rushing the completion logic.</p>
+
+    <h3>3. I/O, Memory, and VFS (0002–0004)</h3>
+    <p>Agents spend significant time scanning files and querying local vector databases. We extend the control plane to <code>io_uring</code>, <code>blk-mq</code>, page faults, and VFS metadata resolution. This ensures that a page-cache miss or a <code>stat()</code> call on a repository file doesn't stall the control loop behind unrelated background work.</p>
+
+    <h3>4. Budgeting & Guardrails (0005)</h3>
+    <p>Because these mechanisms bypass standard power saving, they must be bounded. We implement a <strong>cgroup token bucket</strong>. A workload is granted a "latency budget"; once exhausted, the system falls back to standard reactive behavior, protecting the machine's thermal and energy budget.</p>
+
+    <h2>Observability via eBPF</h2>
+    <p>Traditional tools like <code>top</code> or <code>vmstat</code> are useless here because they average behavior over seconds. To see the control plane in action, we use <code>bpftrace</code> to measure the micro-latency of every transition:</p>
+    
+    <pre><code># Measure wakeup-to-run latency for agent steps
+tracepoint:agent_latency:agent_wakeup_to_run {
+    @latency = hist(args->latency_us, 0, 1000, 10);
+}</code></pre>
+
+    <h2>Conclusion</h2>
+    <p>Agentic AI is forcing us to rethink the kernel's "reactive" bias. By introducing a temporal control plane, we can eliminate the hidden cumulative latencies that currently throttle AI agents on Linux. This isn't just about speed; it's about making the kernel <strong>agent-aware</strong>.</p>
+    
+    <p>In Part 2, we will dive into the specific eBPF data collected from these patches and analyze the trade-offs between latency gain and energy cost.</p>
+</section>
+
+<footer>
+    <p>Project Repository: <a href="https://github.com/manishklach/kernel-dvfs-agentic-latency">kernel-dvfs-agentic-latency</a></p>
+    <p>&copy; 2026 Manish KL. Systems Research Group.</p>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,26 @@
+#!/usr/bin/env bpftrace
+/*
+ * Measure VFS path lookup latency for agent workloads.
+ * Output format: timestamp,cpu,pid,nd_ptr,latency_us
+ * 
+ * CSV Header: timestamp,cpu,pid,nd_ptr,latency_us
+ */
+
+tracepoint:agent_latency:agent_vfs_path_lookup
+/comm == "agent_loop"/
+{
+    @start[tid] = nsecs;
+    @ptr[tid] = args->nd;
+}
+
+/* We correlate path_lookup end by looking for the next vfs_op_begin 
+ * or using kretprobe if available. For RFC simplicity, we use kprobes fallback here.
+ */
+kretprobe:path_lookupat
+/@start[tid]/
+{
+    $latency = (nsecs - @start[tid]) / 1000;
+    printf("%llu,%d,%d,%p,%llu\n", nsecs, 0, 0, @ptr[tid], $latency);
+    delete(@start[tid]);
+    delete(@ptr[tid]);
+}

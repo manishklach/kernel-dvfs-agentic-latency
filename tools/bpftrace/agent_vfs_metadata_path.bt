@@ -1,0 +1,33 @@
+#!/usr/bin/env bpftrace
+/*
+ * Correlate the complete VFS metadata path.
+ * Output format: timestamp,cpu,pid,event,val
+ * 
+ * CSV Header: timestamp,cpu,pid,event,val
+ */
+
+tracepoint:agent_latency:agent_vfs_op_begin
+{
+    printf("%llu,%d,%d,op_begin,%s\n", nsecs, args->cpu, args->pid, args->op);
+}
+
+tracepoint:agent_latency:agent_vfs_path_lookup
+{
+    printf("%llu,%d,%d,path_lookup,%p\n", nsecs, args->cpu, args->pid, args->nd);
+}
+
+tracepoint:agent_latency:agent_dentry_cache_event
+/!args->hit/
+{
+    printf("%llu,%d,%d,dentry_miss,%p\n", nsecs, args->cpu, args->pid, args->dentry);
+}
+
+tracepoint:agent_latency:agent_vfs_op_end
+{
+    printf("%llu,%d,%d,op_end,%ld\n", nsecs, args->cpu, args->pid, args->ret);
+}
+
+tracepoint:agent_latency:agent_blk_rq_issue
+{
+    printf("%llu,%d,0,blk_rq_issue,%p\n", nsecs, args->cpu, args->rq);
+}

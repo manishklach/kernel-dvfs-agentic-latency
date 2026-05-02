@@ -1,0 +1,27 @@
+#!/usr/bin/env bpftrace
+/*
+ * Measure VFS readdir latency for agent workloads.
+ * Output format: timestamp,cpu,pid,file_ptr,latency_us
+ * 
+ * CSV Header: timestamp,cpu,pid,file_ptr,latency_us
+ */
+
+tracepoint:agent_latency:agent_vfs_op_begin
+/args->op == "readdir" && comm == "agent_loop"/
+{
+    @start[tid] = nsecs;
+    @ptr[tid] = args->ptr;
+}
+
+tracepoint:agent_latency:agent_vfs_op_end
+/args->op == "readdir" && @start[tid]/
+{
+    $latency = (nsecs - @start[tid]) / 1000;
+    printf("%llu,%d,%d,%p,%llu\n", nsecs, args->cpu, args->pid, @ptr[tid], $latency);
+    delete(@start[tid]);
+    delete(@ptr[tid]);
+}
+
+/* Fallback for unpatched kernels:
+ * tracepoint:syscalls:sys_enter_getdents64 { @start[tid] = nsecs; }
+ */

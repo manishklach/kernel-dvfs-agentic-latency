@@ -1,0 +1,250 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Manish KL <manish@example.com>
+Date: Sat, 2 May 2026 00:00:00 +0530
+Subject: [RFC PATCH 1/1] vfs: add agent latency metadata attribution
+
+Agentic coding and retrieval systems frequently perform high volumes of
+metadata operations, such as scanning repositories, checking for file
+existence, and reading directory trees. These operations often stall on
+path lookup and dentry/inode cache resolution.
+
+This patch adds experimental tracepoints to the VFS metadata paths
+(open, stat, readdir, and path lookup) to surface latency gates for
+agent-tagged tasks.
+
+This RFC focuses strictly on observability; no new metadata cache
+pinning or batching policy is implemented yet.
+
+Patch layout:
+  [1/4] fs: add agent latency tracepoints for open, stat, readdir
+  [2/4] fs/namei: add agent latency tracepoints for path lookup
+  [3/4] docs: add vfs-metadata-attribution documentation
+  [4/4] tools: add bpftrace scripts for VFS latency
+
+---
+ include/linux/sched/agent_latency.h  |   3 +
+ include/trace/events/agent_latency.h | 125 +++++++++++++++++++++++++++
+ fs/open.c                           |  18 ++++
+ fs/stat.c                           |  18 ++++
+ fs/readdir.c                        |  18 ++++
+ fs/namei.c                          |  14 +++
+ 6 files changed, 196 insertions(+)
+
+diff --git a/include/linux/sched/agent_latency.h b/include/linux/sched/agent_latency.h
+--- a/include/linux/sched/agent_latency.h
++++ b/include/linux/sched/agent_latency.h
+@@ -90,6 +90,9 @@ static inline u64 agent_step_from_user_data(u64 user_data)
+ #define MADV_AGENT_HOTSET 0x47
+ #define MADV_AGENT_SCAN   0x48
+ 
++/* RFC TODO: Evaluate dentry cache pinning or path-lookup batching hints */
++#define LOOKUP_AGENT_LATENCY 0x01000000
++
+ #else
+diff --git a/include/trace/events/agent_latency.h b/include/trace/events/agent_latency.h
+--- a/include/trace/events/agent_latency.h
++++ b/include/trace/events/agent_latency.h
+@@ -342,6 +342,131 @@ TRACE_EVENT(agent_pagecache_event,
+                   __entry->cpu, __entry->pid, __entry->step_id, __entry->hit, __entry->pgoff)
+ );
+ 
++TRACE_EVENT(agent_vfs_op_begin,
++        TP_PROTO(const char *op, void *ptr),
++        TP_ARGS(op, ptr),
++        TP_STRUCT__entry(
++                __field(int, cpu)
++                __field(pid_t, pid)
++                __string(op, op)
++                __field(void *, ptr)
++                __field(u64, step_id)
++        ),
++        TP_fast_assign(
++                __entry->cpu = smp_processor_id();
++                __entry->pid = current->pid;
++                __assign_str(op, op);
++                __entry->ptr = ptr;
++                __entry->step_id = task_agent_latency(current) ? current->agent_step_id : 0;
++        ),
++        TP_printk("cpu=%d pid=%d step_id=%llu op=%s ptr=%p",
++                  __entry->cpu, __entry->pid, __entry->step_id, __get_str(op), __entry->ptr)
++);
++
++TRACE_EVENT(agent_vfs_op_end,
++        TP_PROTO(const char *op, long ret),
++        TP_ARGS(op, ret),
++        TP_STRUCT__entry(
++                __field(int, cpu)
++                __field(pid_t, pid)
++                __string(op, op)
++                __field(long, ret)
++        ),
++        TP_fast_assign(
++                __entry->cpu = smp_processor_id();
++                __entry->pid = current->pid;
++                __assign_str(op, op);
++                __entry->ret = ret;
++        ),
++        TP_printk("cpu=%d pid=%d op=%s ret=%ld",
++                  __entry->cpu, __entry->pid, __get_str(op), __entry->ret)
++);
++
++TRACE_EVENT(agent_vfs_path_lookup,
++        TP_PROTO(void *nd, unsigned int flags),
++        TP_ARGS(nd, flags),
++        TP_STRUCT__entry(
++                __field(int, cpu)
++                __field(pid_t, pid)
++                __field(void *, nd)
++                __field(unsigned int, flags)
++                __field(u64, step_id)
++        ),
++        TP_fast_assign(
++                __entry->cpu = smp_processor_id();
++                __entry->pid = current->pid;
++                __entry->nd = nd;
++                __entry->flags = flags;
++                __entry->step_id = task_agent_latency(current) ? current->agent_step_id : 0;
++        ),
++        TP_printk("cpu=%d pid=%d step_id=%llu nd=%p flags=%u",
++                  __entry->cpu, __entry->pid, __entry->step_id, __entry->nd, __entry->flags)
++);
++
++TRACE_EVENT(agent_dentry_cache_event,
++        TP_PROTO(bool hit, void *dentry),
++        TP_ARGS(hit, dentry),
++        TP_STRUCT__entry(
++                __field(int, cpu)
++                __field(pid_t, pid)
++                __field(bool, hit)
++                __field(void *, dentry)
++                __field(u64, step_id)
++        ),
++        TP_fast_assign(
++                __entry->cpu = smp_processor_id();
++                __entry->pid = current->pid;
++                __entry->hit = hit;
++                __entry->dentry = dentry;
++                __entry->step_id = task_agent_latency(current) ? current->agent_step_id : 0;
++        ),
++        TP_printk("cpu=%d pid=%d step_id=%llu hit=%d dentry=%p",
++                  __entry->cpu, __entry->pid, __entry->step_id, __entry->hit, __entry->dentry)
++);
++
+ #endif
+diff --git a/fs/open.c b/fs/open.c
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -35,6 +35,11 @@
+ #include <linux/file.h>
+ #include <linux/fdtable.h>
+ 
++#ifdef CONFIG_AGENT_LATENCY
++#include <linux/sched/agent_latency.h>
++#include <trace/events/agent_latency.h>
++#endif
++
+@@ -1200,6 +1205,12 @@ long do_sys_openat2(int dfd, const char __user *filename,
+         long fd;
+ 
++#ifdef CONFIG_AGENT_LATENCY
++        if (task_agent_latency(current))
++                trace_agent_vfs_op_begin("open", (void *)filename);
++#endif
++
+         /* ... */
+ 
+         fd = do_filp_open(dfd, tmp, &op);
+ 
++#ifdef CONFIG_AGENT_LATENCY
++        if (task_agent_latency(current))
++                trace_agent_vfs_op_end("open", fd);
++#endif
++
+         return fd;
+ }
+diff --git a/fs/stat.c b/fs/stat.c
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@ -21,6 +21,11 @@
+ #include <linux/uaccess.h>
+ #include <linux/compat.h>
+ 
++#ifdef CONFIG_AGENT_LATENCY
++#include <linux/sched/agent_latency.h>
++#include <trace/events/agent_latency.h>
++#endif
++
+@@ -200,6 +205,12 @@ int vfs_statx(int dfd, const char __user *filename, int flags,
+         int error;
+ 
++#ifdef CONFIG_AGENT_LATENCY
++        if (task_agent_latency(current))
++                trace_agent_vfs_op_begin("stat", (void *)filename);
++#endif
++
+         /* ... */
+ 
+         error = vfs_statx_path(&path, stat, request_mask, query_flags);
+ 
++#ifdef CONFIG_AGENT_LATENCY
++        if (task_agent_latency(current))
++                trace_agent_vfs_op_end("stat", (long)error);
++#endif
++
+         return error;
+ }
+diff --git a/fs/readdir.c b/fs/readdir.c
+--- a/fs/readdir.c
++++ b/fs/readdir.c
+@@ -21,6 +21,11 @@
+ #include <linux/security.h>
+ #include <linux/syscalls.h>
+ 
++#ifdef CONFIG_AGENT_LATENCY
++#include <linux/sched/agent_latency.h>
++#include <trace/events/agent_latency.h>
++#endif
++
+@@ -50,6 +55,12 @@ int iterate_dir(struct file *file, struct dir_context *ctx)
+         int res = -ENOENT;
+ 
++#ifdef CONFIG_AGENT_LATENCY
++        if (task_agent_latency(current))
++                trace_agent_vfs_op_begin("readdir", file);
++#endif
++
+         /* ... */
+ 
+         res = file->f_op->iterate_shared(file, ctx);
+ 
++#ifdef CONFIG_AGENT_LATENCY
++        if (task_agent_latency(current))
++                trace_agent_vfs_op_end("readdir", (long)res);
++#endif
++
+         return res;
+ }
+diff --git a/fs/namei.c b/fs/namei.c
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -43,6 +43,11 @@
+ #include <linux/bitops.h>
+ #include <linux/init_task.h>
+ 
++#ifdef CONFIG_AGENT_LATENCY
++#include <linux/sched/agent_latency.h>
++#include <trace/events/agent_latency.h>
++#endif
++
+@@ -2400,6 +2405,13 @@ static int path_lookupat(struct nameidata *nd, unsigned int flags, struct path *
+ {
+         int err;
+ 
++#ifdef CONFIG_AGENT_LATENCY
++        if (task_agent_latency(current))
++                trace_agent_vfs_path_lookup(nd, flags);
++#endif
++
+         /* ... */
+         return err;
+ }

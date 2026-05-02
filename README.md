@@ -34,6 +34,10 @@ Agent loops frequently block on local storage and async I/O. This repo now inclu
 ## MM and Page Cache Attribution
 
 Agent loops often stall on mmap/page-cache-backed data. This repo now includes RFC tracepoints and bpftrace tools for page fault and filemap/page-cache attribution.
+
+## VFS Metadata Attribution
+
+Agentic coding and retrieval workloads frequently scan directories and issue many open/stat/readdir operations. This repo now includes RFC tracepoints and bpftrace tools to measure VFS metadata latency.
 ## What This Repo Does
 This is **not** a generic AI repo. This is **not** a "performance tuning" guide. This is a cross-subsystem Linux kernel research project exploring a new scheduler abstraction that spans 4 kernel subsystems:
 

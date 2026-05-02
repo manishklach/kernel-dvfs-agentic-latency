@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700" role="img" aria-labelledby="title desc">
+  <title id="title">Agent DVFS Window</title>
+  <desc id="desc">Conceptual diagram of baseline wait to wakeup behavior and the proposed agent active window keeping the CPU warm.</desc>
+  <rect width="1200" height="700" fill="#ffffff"/>
+  <rect x="60" y="50" width="1080" height="260" rx="26" fill="#f8fbff" stroke="#d5e7ff"/>
+  <rect x="60" y="360" width="1080" height="280" rx="26" fill="#f7fffb" stroke="#cfeee0"/>
+  <text x="90" y="95" font-family="SF Pro Display, Helvetica, Arial, sans-serif" font-size="34" fill="#0f172a">Baseline: bursty loop pays repeated cool-down and warmup cost</text>
+  <text x="90" y="405" font-family="SF Pro Display, Helvetica, Arial, sans-serif" font-size="34" fill="#0f172a">Proposed: short agent active window keeps performance warm briefly</text>
+
+  <line x1="110" y1="180" x2="1080" y2="180" stroke="#bfd5ee" stroke-width="6" stroke-linecap="round"/>
+  <line x1="110" y1="500" x2="1080" y2="500" stroke="#b6e0cf" stroke-width="6" stroke-linecap="round"/>
+
+  <g font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="24" fill="#0f172a">
+    <rect x="120" y="140" width="150" height="80" rx="20" fill="#e0efff"/>
+    <text x="164" y="188">wait</text>
+    <rect x="320" y="120" width="190" height="120" rx="20" fill="#dbeafe"/>
+    <text x="345" y="173">downscale risk</text>
+    <text x="360" y="205">deep idle risk</text>
+    <rect x="560" y="140" width="170" height="80" rx="20" fill="#d1fae5"/>
+    <text x="590" y="188">completion</text>
+    <rect x="780" y="140" width="140" height="80" rx="20" fill="#bfdbfe"/>
+    <text x="816" y="188">wakeup</text>
+    <rect x="960" y="120" width="150" height="120" rx="20" fill="#fde68a"/>
+    <text x="983" y="173">freq ramp</text>
+    <text x="992" y="205">idle exit</text>
+
+    <rect x="120" y="460" width="150" height="80" rx="20" fill="#dcfce7"/>
+    <text x="164" y="508">wait</text>
+    <rect x="315" y="430" width="290" height="140" rx="24" fill="#bbf7d0" stroke="#10b981" stroke-width="3"/>
+    <text x="355" y="492">agent active window</text>
+    <text x="350" y="525">holds util / limits idle depth</text>
+    <rect x="650" y="460" width="170" height="80" rx="20" fill="#d1fae5"/>
+    <text x="680" y="508">completion</text>
+    <rect x="860" y="460" width="140" height="80" rx="20" fill="#bfdbfe"/>
+    <text x="896" y="508">wakeup</text>
+    <rect x="1030" y="460" width="80" height="80" rx="20" fill="#93c5fd"/>
+    <text x="1054" y="508">run</text>
+  </g>
+
+  <g stroke="#7aa7d8" stroke-width="5" fill="none" stroke-linecap="round">
+    <path d="M270 180 L320 180"/>
+    <path d="M510 180 L560 180"/>
+    <path d="M730 180 L780 180"/>
+    <path d="M920 180 L960 180"/>
+  </g>
+  <g stroke="#52b788" stroke-width="5" fill="none" stroke-linecap="round">
+    <path d="M270 500 L315 500"/>
+    <path d="M605 500 L650 500"/>
+    <path d="M820 500 L860 500"/>
+    <path d="M1000 500 L1030 500"/>
+  </g>
+
+  <text x="92" y="286" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="22" fill="#475569">
+    In the baseline path, a brief blocked interval may still be long enough for cpuidle and DVFS to cool the CPU.
+  </text>
+  <text x="92" y="610" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="22" fill="#475569">
+    The proposed window is bounded: it biases existing policy for a short period instead of forcing permanent high performance.
+  </text>
+</svg>

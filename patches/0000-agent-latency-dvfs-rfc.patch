@@ -1,0 +1,604 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Manish KL <manish@example.com>
+Date: Sat, 2 May 2026 00:00:00 +0530
+Subject: [RFC PATCH 0/7] sched/cpufreq: agent-aware DVFS windows
+
+Agentic AI workloads execute short control loops separated by waits on
+network, disk, timer, or io_uring completions. On power-managed ARM
+systems, those waits can be long enough for schedutil/cpuidle to reduce
+performance state, but short enough that the next completion immediately
+pays frequency-ramp and idle-exit latency.
+
+This RFC introduces an experimental CONFIG_AGENT_LATENCY feature that
+adds a bounded "agent active window" to the scheduler runqueue. While a
+window is active, schedutil observes a minimum effective utilization and
+cpuidle can avoid idle states whose exit latency exceeds a configurable
+agent latency budget.
+
+This is a research patch skeleton, not upstream-ready. It is intended for
+local kernel branch experimentation, Codex/Gemini refinement, and blog/paper
+artifact development.
+
+Patch layout:
+  [1/7] sched: add SCHED_FLAG_AGENT_LATENCY and task helpers
+  [2/7] sched: track agent active window on rq
+  [3/7] sched/fair: refresh agent window on wakeup
+  [4/7] sched/cpufreq: apply agent min-util boost in schedutil
+  [5/7] cpuidle: add agent latency guard helper
+  [6/7] trace: add agent latency DVFS tracepoints
+  [7/7] tools: add minimal agent_loop microbenchmark
+
+Design notes:
+  - Builds on schedutil rather than replacing CPUFreq.
+  - Complements uclamp; uclamp is a performance hint while this models a
+    short active control-loop window.
+  - Does not create a real-time class and does not bypass fairness.
+  - A production version must include cgroup budgets, thermal constraints,
+    and admin policy to prevent hint abuse.
+
+References:
+  - Documentation/admin-guide/pm/cpufreq.rst
+  - Documentation/scheduler/sched-util-clamp.rst
+  - Documentation/trace/events-power.rst
+  - kernel/sched/cpufreq_schedutil.c
+  - drivers/cpuidle/
+
+---
+ include/linux/sched.h                              | 24 ++++++
+ include/linux/sched/agent_latency.h                | 70 +++++++++++++++++
+ include/trace/events/agent_latency.h               | 74 ++++++++++++++++++
+ include/uapi/linux/sched.h                         |  1 +
+ kernel/sched/Kconfig                               | 18 +++++
+ kernel/sched/core.c                                | 34 ++++++++
+ kernel/sched/cpufreq_schedutil.c                   | 31 ++++++++
+ kernel/sched/fair.c                                | 12 +++
+ kernel/sched/sched.h                               |  7 ++
+ drivers/cpuidle/cpuidle.c                          | 24 ++++++
+ tools/testing/selftests/agent_latency/Makefile     |  8 ++
+ tools/testing/selftests/agent_latency/agent_loop.c  | 98 +++++++++++++++++++++++
+ 12 files changed, 401 insertions(+)
+
+diff --git a/include/uapi/linux/sched.h b/include/uapi/linux/sched.h
+--- a/include/uapi/linux/sched.h
++++ b/include/uapi/linux/sched.h
+@@ -134,6 +134,7 @@
+ #define SCHED_FLAG_KEEP_PARAMS          0x10
+ #define SCHED_FLAG_UTIL_CLAMP_MIN       0x20
+ #define SCHED_FLAG_UTIL_CLAMP_MAX       0x40
++#define SCHED_FLAG_AGENT_LATENCY        0x10000000 /* RFC: latency-amplified agent control loop */
+ 
+ #define SCHED_FLAG_KEEP_ALL     (SCHED_FLAG_KEEP_POLICY | \
+                                  SCHED_FLAG_KEEP_PARAMS)
+
+diff --git a/include/linux/sched/agent_latency.h b/include/linux/sched/agent_latency.h
+new file mode 100644
+--- /dev/null
++++ b/include/linux/sched/agent_latency.h
+@@ -0,0 +1,70 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Experimental agent-latency helpers.
++ *
++ * Agentic workloads execute short bursts separated by waits on async
++ * completions. This file provides a small scheduler-facing abstraction
++ * for keeping CPU frequency and idle behavior warm across those gaps.
++ */
++#ifndef _LINUX_SCHED_AGENT_LATENCY_H
++#define _LINUX_SCHED_AGENT_LATENCY_H
++
++#include <linux/sched.h>
++#include <linux/ktime.h>
++
++#ifdef CONFIG_AGENT_LATENCY
++
++/* Conservative defaults; production needs cgroup/admin policy. */
++#define AGENT_LATENCY_DEFAULT_WINDOW_NS  (2ULL * NSEC_PER_MSEC)
++#define AGENT_LATENCY_DEFAULT_MIN_UTIL   (SCHED_CAPACITY_SCALE / 2)
++#define AGENT_LATENCY_IDLE_EXIT_LIMIT_US 50
++
++static inline bool task_agent_latency(const struct task_struct *p)
++{
++        return p->sched_flags & SCHED_FLAG_AGENT_LATENCY;
++}
++
++static inline bool rq_agent_window_active(struct rq *rq, u64 now)
++{
++        return rq->agent_active_until_ns > now;
++}
++
++static inline void rq_agent_refresh_window(struct rq *rq,
++                                           unsigned int min_util,
++                                           u64 window_ns)
++{
++        u64 until = ktime_get_ns() + window_ns;
++
++        if (until > rq->agent_active_until_ns)
++                rq->agent_active_until_ns = until;
++
++        if (min_util > rq->agent_min_util)
++                rq->agent_min_util = min_util;
++}
++
++static inline void task_agent_refresh_window(struct rq *rq,
++                                             struct task_struct *p)
++{
++        if (!task_agent_latency(p))
++                return;
++
++        rq_agent_refresh_window(rq,
++                p->agent_min_util ?: AGENT_LATENCY_DEFAULT_MIN_UTIL,
++                p->agent_window_ns ?: AGENT_LATENCY_DEFAULT_WINDOW_NS);
++}
++
++#else
++
++static inline bool task_agent_latency(const struct task_struct *p) { return false; }
++static inline bool rq_agent_window_active(struct rq *rq, u64 now) { return false; }
++static inline void rq_agent_refresh_window(struct rq *rq, unsigned int min_util,
++                                           u64 window_ns) { }
++static inline void task_agent_refresh_window(struct rq *rq,
++                                             struct task_struct *p) { }
++
++#endif
++
++#endif
+
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -1500,6 +1500,30 @@ struct task_struct {
+         unsigned long                   atomic_flags;
+ 
++#ifdef CONFIG_AGENT_LATENCY
++        /*
++         * Experimental agent latency metadata.
++         *
++         * agent_window_ns: preserve rq active window after this control-loop
++         * task wakes/runs.
++         *
++         * agent_min_util: minimum effective schedutil utilization during the
++         * active window.
++         *
++         * agent_id/agent_step_id: optional attribution fields for tracepoints.
++         */
++        u64                             agent_window_ns;
++        unsigned int                    agent_min_util;
++        u32                             agent_id;
++        u64                             agent_step_id;
++#endif
++
+         struct restart_block            restart_block;
+ 
+
+diff --git a/kernel/sched/Kconfig b/kernel/sched/Kconfig
+--- a/kernel/sched/Kconfig
++++ b/kernel/sched/Kconfig
+@@ -128,6 +128,24 @@ config UCLAMP_BUCKETS_COUNT
+           Defines the number of clamp buckets to use. The range of each bucket
+           is SCHED_CAPACITY_SCALE/CONFIG_UCLAMP_BUCKETS_COUNT.
+ 
++config AGENT_LATENCY
++        bool "Experimental agent latency windows for schedutil/cpuidle"
++        depends on CPU_FREQ_GOV_SCHEDUTIL
++        default n
++        help
++          Enable experimental scheduler metadata for latency-amplified agent
++          control loops. When a task is marked with SCHED_FLAG_AGENT_LATENCY,
++          wakeups refresh a short per-runqueue active window. schedutil may
++          apply a minimum utilization during that window and cpuidle may avoid
++          idle states with excessive exit latency.
++
++          This is a research feature. It is not intended for production without
++          cgroup budgets, thermal constraints, and admin policy.
++
++          Say N unless you are experimenting with agentic workload control-path
++          latency.
++
+ endmenu
+
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -1045,6 +1045,13 @@ struct rq {
+         unsigned long           cpu_capacity_orig;
+         unsigned long           cpu_capacity;
+ 
++#ifdef CONFIG_AGENT_LATENCY
++        u64                     agent_active_until_ns;
++        unsigned int            agent_min_util;
++        int                     agent_home_cpu;
++        u64                     agent_last_step_id;
++#endif
++
+         struct balance_callback *balance_callback;
+ 
+
+diff --git a/include/trace/events/agent_latency.h b/include/trace/events/agent_latency.h
+new file mode 100644
+--- /dev/null
++++ b/include/trace/events/agent_latency.h
+@@ -0,0 +1,74 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#undef TRACE_SYSTEM
++#define TRACE_SYSTEM agent_latency
++
++#if !defined(_TRACE_AGENT_LATENCY_H) || defined(TRACE_HEADER_MULTI_READ)
++#define _TRACE_AGENT_LATENCY_H
++
++#include <linux/tracepoint.h>
++
++TRACE_EVENT(agent_window_refresh,
++        TP_PROTO(int cpu, pid_t pid, u64 step_id, u64 active_until_ns,
++                 unsigned int min_util),
++        TP_ARGS(cpu, pid, step_id, active_until_ns, min_util),
++        TP_STRUCT__entry(
++                __field(int, cpu)
++                __field(pid_t, pid)
++                __field(u64, step_id)
++                __field(u64, active_until_ns)
++                __field(unsigned int, min_util)
++        ),
++        TP_fast_assign(
++                __entry->cpu = cpu;
++                __entry->pid = pid;
++                __entry->step_id = step_id;
++                __entry->active_until_ns = active_until_ns;
++                __entry->min_util = min_util;
++        ),
++        TP_printk("cpu=%d pid=%d step=%llu until=%llu min_util=%u",
++                  __entry->cpu, __entry->pid, __entry->step_id,
++                  __entry->active_until_ns, __entry->min_util)
++);
++
++TRACE_EVENT(agent_schedutil_boost,
++        TP_PROTO(int cpu, unsigned long util_before, unsigned long util_after),
++        TP_ARGS(cpu, util_before, util_after),
++        TP_STRUCT__entry(
++                __field(int, cpu)
++                __field(unsigned long, util_before)
++                __field(unsigned long, util_after)
++        ),
++        TP_fast_assign(
++                __entry->cpu = cpu;
++                __entry->util_before = util_before;
++                __entry->util_after = util_after;
++        ),
++        TP_printk("cpu=%d util_before=%lu util_after=%lu",
++                  __entry->cpu, __entry->util_before, __entry->util_after)
++);
++
++TRACE_EVENT(agent_cpuidle_guard,
++        TP_PROTO(int cpu, int original_state, int selected_state, unsigned int limit_us),
++        TP_ARGS(cpu, original_state, selected_state, limit_us),
++        TP_STRUCT__entry(
++                __field(int, cpu)
++                __field(int, original_state)
++                __field(int, selected_state)
++                __field(unsigned int, limit_us)
++        ),
++        TP_fast_assign(
++                __entry->cpu = cpu;
++                __entry->original_state = original_state;
++                __entry->selected_state = selected_state;
++                __entry->limit_us = limit_us;
++        ),
++        TP_printk("cpu=%d original=%d selected=%d limit_us=%u",
++                  __entry->cpu, __entry->original_state,
++                  __entry->selected_state, __entry->limit_us)
++);
++
++#endif
++
++#include <trace/define_trace.h>
+
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -78,6 +78,10 @@
+ #include "sched.h"
+ #include "stats.h"
+ 
++#ifdef CONFIG_AGENT_LATENCY
++#include <linux/sched/agent_latency.h>
++#include <trace/events/agent_latency.h>
++#endif
++
+ static DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
+ 
+@@ -2100,6 +2104,24 @@ static int __sched_setscheduler(struct task_struct *p,
+         if (retval)
+                 return retval;
+ 
++#ifdef CONFIG_AGENT_LATENCY
++        if (attr->sched_flags & SCHED_FLAG_AGENT_LATENCY) {
++                /*
++                 * RFC policy: allow normal tasks to opt in, but do not allow
++                 * RT/DL policy to stack with this experimental flag yet.
++                 */
++                if (attr->sched_policy != SCHED_NORMAL &&
++                    attr->sched_policy != SCHED_BATCH &&
++                    attr->sched_policy != SCHED_IDLE)
++                        return -EINVAL;
++
++                p->agent_window_ns = AGENT_LATENCY_DEFAULT_WINDOW_NS;
++                p->agent_min_util = AGENT_LATENCY_DEFAULT_MIN_UTIL;
++        }
++#endif
++
+         /* existing code continues */
+@@ -3840,6 +3862,18 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
+         success = 1;
+ 
++#ifdef CONFIG_AGENT_LATENCY
++        if (task_agent_latency(p)) {
++                struct rq *rq = cpu_rq(task_cpu(p));
++
++                raw_spin_rq_lock(rq);
++                task_agent_refresh_window(rq, p);
++                trace_agent_window_refresh(cpu_of(rq), task_pid_nr(p),
++                                           p->agent_step_id,
++                                           rq->agent_active_until_ns,
++                                           rq->agent_min_util);
++                raw_spin_rq_unlock(rq);
++        }
++#endif
++
+ out:
+         raw_spin_unlock_irqrestore(&p->pi_lock, flags);
+
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -50,6 +50,10 @@
+ #include "sched.h"
+ #include "stats.h"
+ 
++#ifdef CONFIG_AGENT_LATENCY
++#include <linux/sched/agent_latency.h>
++#endif
++
+@@ -7400,6 +7404,14 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
+         int new_cpu = prev_cpu;
+         int want_affine = 0;
+ 
++#ifdef CONFIG_AGENT_LATENCY
++        if (task_agent_latency(p)) {
++                /* Conservative RFC behavior: preserve cache locality first.
++                 * Later patches can avoid IRQ/softirq-hot CPUs explicitly.
++                 */
++                return prev_cpu;
++        }
++#endif
+         /* existing code continues */
+
+diff --git a/kernel/sched/cpufreq_schedutil.c b/kernel/sched/cpufreq_schedutil.c
+--- a/kernel/sched/cpufreq_schedutil.c
++++ b/kernel/sched/cpufreq_schedutil.c
+@@ -8,6 +8,10 @@
+ #include <uapi/linux/sched/types.h>
+ #include "sched.h"
+ 
++#ifdef CONFIG_AGENT_LATENCY
++#include <linux/sched/agent_latency.h>
++#include <trace/events/agent_latency.h>
++#endif
++
+ #define IOWAIT_BOOST_MIN        (SCHED_CAPACITY_SCALE / 8)
+ 
+@@ -420,6 +424,30 @@ static inline bool sugov_cpu_is_busy(struct sugov_cpu *sg_cpu) { ... }
+ }
+ 
++#ifdef CONFIG_AGENT_LATENCY
++static unsigned long agent_latency_boost_util(struct sugov_cpu *sg_cpu,
++                                              unsigned long util,
++                                              unsigned long max)
++{
++        struct rq *rq = cpu_rq(sg_cpu->cpu);
++        unsigned long before = util;
++        u64 now = ktime_get_ns();
++
++        if (rq_agent_window_active(rq, now)) {
++                util = max(util, (unsigned long)rq->agent_min_util);
++                util = min(util, max);
++
++                if (util != before)
++                        trace_agent_schedutil_boost(sg_cpu->cpu, before, util);
++        }
++
++        return util;
++}
++#else
++static inline unsigned long agent_latency_boost_util(struct sugov_cpu *sg_cpu,
++                                                     unsigned long util,
++                                                     unsigned long max)
++{
++        return util;
++}
++#endif
++
+ static void sugov_update_single_freq(struct update_util_data *hook, u64 time,
+                                      unsigned int flags)
+ {
+@@ -450,6 +478,9 @@ static void sugov_update_single_freq(struct update_util_data *hook, u64 time,
+         util = sugov_get_util(sg_cpu, boost);
+         max = sg_cpu->max;
+ 
++        /* RFC: preserve frequency during active agent control-loop windows. */
++        util = agent_latency_boost_util(sg_cpu, util, max);
++
+         next_f = get_next_freq(sg_policy, util, max);
+
+diff --git a/drivers/cpuidle/cpuidle.c b/drivers/cpuidle/cpuidle.c
+--- a/drivers/cpuidle/cpuidle.c
++++ b/drivers/cpuidle/cpuidle.c
+@@ -20,6 +20,11 @@
+ #include "cpuidle.h"
+ 
++#ifdef CONFIG_AGENT_LATENCY
++#include <linux/sched/agent_latency.h>
++#include <trace/events/agent_latency.h>
++#endif
++
+@@ -244,6 +249,25 @@ int cpuidle_enter_state(struct cpuidle_device *dev, struct cpuidle_driver *drv,
+         if (index < 0)
+                 return -EINVAL;
+ 
++#ifdef CONFIG_AGENT_LATENCY
++        {
++                struct rq *rq = cpu_rq(dev->cpu);
++                u64 now = ktime_get_ns();
++                int orig = index;
++
++                if (rq_agent_window_active(rq, now)) {
++                        while (index > 0 &&
++                               drv->states[index].exit_latency >
++                               AGENT_LATENCY_IDLE_EXIT_LIMIT_US)
++                                index--;
++
++                        if (index != orig)
++                                trace_agent_cpuidle_guard(dev->cpu, orig, index,
++                                                          AGENT_LATENCY_IDLE_EXIT_LIMIT_US);
++                }
++        }
++#endif
++
+         target_state = &drv->states[index];
+
+diff --git a/tools/testing/selftests/agent_latency/Makefile b/tools/testing/selftests/agent_latency/Makefile
+new file mode 100644
+--- /dev/null
++++ b/tools/testing/selftests/agent_latency/Makefile
+@@ -0,0 +1,8 @@
++# SPDX-License-Identifier: GPL-2.0
++CFLAGS += -O2 -Wall -pthread
++
++TEST_GEN_PROGS := agent_loop
++
++include ../lib.mk
++
++$(TEST_GEN_PROGS): agent_loop.c
+
+diff --git a/tools/testing/selftests/agent_latency/agent_loop.c b/tools/testing/selftests/agent_latency/agent_loop.c
+new file mode 100644
+--- /dev/null
++++ b/tools/testing/selftests/agent_latency/agent_loop.c
+@@ -0,0 +1,98 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Minimal agent-loop latency microbenchmark.
++ *
++ * One producer periodically signals eventfd. The main thread waits in
++ * epoll_wait(), wakes, performs short CPU work, and repeats. This models
++ * "wait for completion -> parse -> next step".
++ */
++#define _GNU_SOURCE
++#include <errno.h>
++#include <linux/sched.h>
++#include <linux/sched/types.h>
++#include <pthread.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/epoll.h>
++#include <sys/eventfd.h>
++#include <sys/syscall.h>
++#include <time.h>
++#include <unistd.h>
++
++#ifndef SCHED_FLAG_AGENT_LATENCY
++#define SCHED_FLAG_AGENT_LATENCY 0x10000000
++#endif
++
++static int efd;
++
++static int mark_agent_control_thread(void)
++{
++        struct sched_attr attr;
++
++        memset(&attr, 0, sizeof(attr));
++        attr.size = sizeof(attr);
++        attr.sched_policy = SCHED_NORMAL;
++        attr.sched_flags = SCHED_FLAG_AGENT_LATENCY;
++        attr.sched_nice = -5;
++
++        return syscall(SYS_sched_setattr, 0, &attr, 0);
++}
++
++static uint64_t nsec_now(void)
++{
++        struct timespec ts;
++
++        clock_gettime(CLOCK_MONOTONIC, &ts);
++        return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
++}
++
++static void busy_parse_work(void)
++{
++        volatile uint64_t x = 0;
++        int i;
++
++        for (i = 0; i < 20000; i++)
++                x += i;
++}
++
++static void *producer(void *arg)
++{
++        uint64_t one = 1;
++
++        for (;;) {
++                usleep(500);
++                if (write(efd, &one, sizeof(one)) < 0 && errno != EAGAIN)
++                        perror("write");
++        }
++
++        return NULL;
++}
++
++int main(int argc, char **argv)
++{
++        struct epoll_event ev, out;
++        pthread_t t;
++        uint64_t step = 0;
++        int ep;
++
++        if (argc > 1 && !strcmp(argv[1], "--agent-latency")) {
++                if (mark_agent_control_thread())
++                        perror("sched_setattr(SCHED_FLAG_AGENT_LATENCY)");
++        }
++
++        efd = eventfd(0, EFD_NONBLOCK);
++        if (efd < 0) {
++                perror("eventfd");
++                return 1;
++        }
++
++        ep = epoll_create1(0);
++        if (ep < 0) {
++                perror("epoll_create1");
++                return 1;
++        }
++
++        ev.events = EPOLLIN;
++        ev.data.fd = efd;
++        if (epoll_ctl(ep, EPOLL_CTL_ADD, efd, &ev)) {
++                perror("epoll_ctl");
++                return 1;
++        }
++
++        pthread_create(&t, NULL, producer, NULL);
++
++        for (;;) {
++                uint64_t val, t0 = nsec_now(), t1;
++
++                epoll_wait(ep, &out, 1, -1);
++                t1 = nsec_now();
++                read(efd, &val, sizeof(val));
++                busy_parse_work();
++
++                if ((step++ % 1000) == 0)
++                        printf("step=%llu epoll_wait_us=%llu\n",
++                               (unsigned long long)step,
++                               (unsigned long long)((t1 - t0) / 1000));
++        }
++}

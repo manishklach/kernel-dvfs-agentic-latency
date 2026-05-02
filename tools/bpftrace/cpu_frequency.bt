@@ -1,0 +1,19 @@
+#!/usr/bin/env bpftrace
+
+/*
+ * Log CPU frequency transitions with a simple line-oriented format suitable
+ * for later parsing by tools/postprocess/correlate_dvfs_wakeup.py.
+ *
+ * Output format:
+ *   FREQ ts_ns=<nsecs> cpu=<cpu> freq=<state>
+ */
+
+BEGIN
+{
+  printf("Tracing power:cpu_frequency. Press Ctrl-C to stop.\n");
+}
+
+tracepoint:power:cpu_frequency
+{
+  printf("FREQ ts_ns=%llu cpu=%d freq=%u\n", nsecs, args->cpu_id, args->state);
+}

@@ -1,0 +1,33 @@
+#!/usr/bin/env bpftrace
+
+/*
+ * Measure time blocked in io_uring_enter() for processes named "agent_loop".
+ * The current selftest does not use io_uring, but the script is included for
+ * related experiments that swap epoll for io_uring completions.
+ *
+ * Output format:
+ *   IOURING ts_ns=<exit_ts> pid=<pid> blocked_us=<us> ret=<ret>
+ */
+
+BEGIN
+{
+  printf("Tracing io_uring_enter blocked time for comm=agent_loop. Press Ctrl-C to stop.\n");
+}
+
+tracepoint:syscalls:sys_enter_io_uring_enter
+/comm == "agent_loop"/
+{
+  @enter_ts[tid] = nsecs;
+}
+
+tracepoint:syscalls:sys_exit_io_uring_enter
+/comm == "agent_loop"/
+{
+  $start = @enter_ts[tid];
+
+  if ($start) {
+    printf("IOURING ts_ns=%llu pid=%d blocked_us=%llu ret=%d\n",
+           nsecs, pid, (nsecs - $start) / 1000, args->ret);
+    delete(@enter_ts[tid]);
+  }
+}

@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>kernel-dvfs-agentic-latency</title>
+  <style>
+    :root {
+      --bg: #f4f8fc;
+      --panel: rgba(255, 255, 255, 0.86);
+      --ink: #0f172a;
+      --muted: #475569;
+      --line: #d6e3f0;
+      --blue: #2563eb;
+      --green: #059669;
+      --gold: #b45309;
+      --shadow: 0 24px 60px rgba(15, 23, 42, 0.10);
+      --radius: 28px;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "SF Pro Text", "Segoe UI", Helvetica, Arial, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(37, 99, 235, 0.14), transparent 32%),
+        radial-gradient(circle at top right, rgba(5, 150, 105, 0.12), transparent 24%),
+        linear-gradient(180deg, #ffffff 0%, var(--bg) 100%);
+    }
+
+    .wrap {
+      width: min(1100px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 36px 0 72px;
+    }
+
+    .hero {
+      padding: 44px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      backdrop-filter: blur(18px);
+      box-shadow: var(--shadow);
+    }
+
+    .eyebrow {
+      display: inline-block;
+      padding: 8px 14px;
+      border-radius: 999px;
+      background: rgba(37, 99, 235, 0.10);
+      color: var(--blue);
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    h1, h2 {
+      margin: 0 0 14px;
+      line-height: 1.05;
+      font-family: "SF Pro Display", "Segoe UI", Helvetica, Arial, sans-serif;
+    }
+
+    h1 { font-size: clamp(40px, 7vw, 72px); margin-top: 20px; }
+    h2 { font-size: clamp(26px, 4vw, 36px); }
+
+    p {
+      margin: 0 0 18px;
+      color: var(--muted);
+      font-size: 18px;
+      line-height: 1.7;
+    }
+
+    .warning {
+      margin-top: 28px;
+      padding: 18px 20px;
+      border-left: 5px solid var(--gold);
+      background: rgba(245, 158, 11, 0.10);
+      border-radius: 18px;
+      color: #7c2d12;
+      font-weight: 600;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 24px;
+      margin-top: 28px;
+    }
+
+    .card {
+      padding: 28px;
+      border-radius: 24px;
+      background: rgba(255, 255, 255, 0.88);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }
+
+    .diagram {
+      width: 100%;
+      border-radius: 24px;
+      border: 1px solid var(--line);
+      background: #fff;
+      box-shadow: var(--shadow);
+      margin-top: 22px;
+    }
+
+    pre {
+      margin: 0;
+      overflow-x: auto;
+      padding: 20px;
+      border-radius: 18px;
+      background: #0f172a;
+      color: #e2e8f0;
+      font-size: 15px;
+      line-height: 1.6;
+    }
+
+    code, pre {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .section { margin-top: 34px; }
+
+    ul {
+      margin: 0;
+      padding-left: 22px;
+      color: var(--muted);
+      line-height: 1.8;
+      font-size: 17px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <span class="eyebrow">Systems Research Project</span>
+      <h1>kernel-dvfs-agentic-latency</h1>
+      <p>
+        Agentic AI control loops are bursty: they issue work, block in a gate like <code>epoll_wait()</code>
+        or <code>io_uring_enter()</code>, wake on a completion, do a small amount of parse-and-decide CPU work,
+        then block again. On ARM Linux, that shape can repeatedly pay cpuidle exit and DVFS ramp latency.
+      </p>
+      <p>
+        This repository packages an RFC kernel patch, tracing tools, a microbenchmark, diagrams, and
+        a measurement plan around one narrow hypothesis: a short bounded agent-active window may reduce
+        repeated warmup penalties without replacing Linux scheduler or power-management policy.
+      </p>
+      <div class="warning">
+        Research / RFC only. This is not production code, not upstream-ready, and not a claim of benchmark wins.
+      </div>
+    </section>
+
+    <section class="section">
+      <img class="diagram" src="../diagrams/agent-dvfs-window.svg" alt="Agent DVFS window diagram">
+    </section>
+
+    <section class="grid section">
+      <article class="card">
+        <h2>Patch Summary</h2>
+        <p>The RFC introduces <code>CONFIG_AGENT_LATENCY</code> and <code>SCHED_FLAG_AGENT_LATENCY</code>, adds small task and runqueue metadata, refreshes a short active window on wakeup, raises effective util in <code>schedutil</code>, and guards against deep idle exits during that window.</p>
+      </article>
+      <article class="card">
+        <h2>What It Is Not</h2>
+        <p>This does not replace CPUFreq, schedutil, uclamp, cpuidle, or fair scheduling. It does not define a new RT class, and it does not yet solve policy, cgroup budgets, thermal constraints, or abuse prevention.</p>
+      </article>
+      <article class="card">
+        <h2>Why It Matters</h2>
+        <p>Agent loops can amplify small per-step delays across hundreds or thousands of iterations. The interesting question is whether wakeup-to-run latency, idle exit, and frequency ramp dominate user-visible time more than aggregate throughput does.</p>
+      </article>
+    </section>
+
+    <section class="grid section">
+      <article class="card">
+        <h2>Measurement Plan</h2>
+        <ul>
+          <li>Baseline with <code>schedutil</code> and default cpuidle</li>
+          <li><code>performance</code> governor as a latency ceiling</li>
+          <li><code>uclamp.min</code> as an existing mechanism</li>
+          <li>Patched kernel with <code>CONFIG_AGENT_LATENCY=y</code></li>
+          <li>Future work: IRQ-aware placement</li>
+        </ul>
+      </article>
+      <article class="card">
+        <h2>Key Metrics</h2>
+        <ul>
+          <li>Step latency <code>p50/p99/p999</code></li>
+          <li>Wakeup-to-run latency</li>
+          <li>CPU frequency transitions</li>
+          <li>Idle-state residency</li>
+          <li><code>epoll_wait()</code> and <code>io_uring_enter()</code> blocked duration</li>
+          <li>Derived frequency-ramp-after-wakeup metric</li>
+        </ul>
+      </article>
+    </section>
+
+    <section class="section card">
+      <h2>Quickstart</h2>
+      <pre><code>git am patches/0000-agent-latency-dvfs-rfc.patch
+scripts/config --enable AGENT_LATENCY
+make -C selftests
+./selftests/agent_loop --steps 10000 --interval-us 500
+./selftests/agent_loop --agent-latency --steps 10000 --interval-us 500
+sudo bpftrace tools/bpftrace/wakeup_to_run.bt
+sudo bpftrace tools/bpftrace/cpu_frequency.bt</code></pre>
+    </section>
+
+    <section class="section card">
+      <h2>Links</h2>
+      <p><a href="../README.md">README</a></p>
+      <p><a href="../docs/architecture.md">Architecture</a></p>
+      <p><a href="../docs/kernel-design.md">Kernel design</a></p>
+      <p><a href="../docs/measurement-plan.md">Measurement plan</a></p>
+      <p><a href="../docs/risks-and-upstreaming.md">Risks and upstreaming</a></p>
+      <p><a href="../patches/0000-agent-latency-dvfs-rfc.patch">RFC patch</a></p>
+    </section>
+  </div>
+</body>
+</html>

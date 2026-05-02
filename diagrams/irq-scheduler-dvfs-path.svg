@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="820" viewBox="0 0 1280 820" role="img" aria-labelledby="title desc">
+  <title id="title">IRQ Scheduler DVFS Path</title>
+  <desc id="desc">A diagram showing IRQ or completion delivery through wakeup, scheduler placement, cpuidle and DVFS state, and userspace resume.</desc>
+  <rect width="1280" height="820" fill="#ffffff"/>
+  <text x="80" y="90" font-family="SF Pro Display, Helvetica, Arial, sans-serif" font-size="40" fill="#0f172a">IRQ -> scheduler -> DVFS / cpuidle -> userspace resume</text>
+  <text x="80" y="130" font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="24" fill="#475569">Conceptual latency path for agentic completion-driven control loops</text>
+
+  <g font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="24" fill="#0f172a">
+    <rect x="80" y="200" width="220" height="100" rx="24" fill="#dbeafe"/>
+    <text x="128" y="258">IRQ / completion</text>
+
+    <rect x="370" y="200" width="250" height="100" rx="24" fill="#dcfce7"/>
+    <text x="410" y="245">softirq / blk-mq</text>
+    <text x="446" y="277">timer path</text>
+
+    <rect x="690" y="200" width="210" height="100" rx="24" fill="#bfdbfe"/>
+    <text x="739" y="258">task wakeup</text>
+
+    <rect x="970" y="180" width="230" height="140" rx="24" fill="#f8fafc" stroke="#cbd5e1" stroke-width="3"/>
+    <text x="997" y="236">scheduler CPU</text>
+    <text x="1019" y="268">selection / rq</text>
+  </g>
+
+  <g stroke="#7aa7d8" stroke-width="6" fill="none" stroke-linecap="round">
+    <path d="M300 250 L370 250"/>
+    <path d="M620 250 L690 250"/>
+    <path d="M900 250 L970 250"/>
+  </g>
+
+  <g font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="23" fill="#0f172a">
+    <rect x="220" y="470" width="270" height="120" rx="24" fill="#eef6ff" stroke="#bfd5ee"/>
+    <text x="280" y="530">cpuidle state</text>
+    <text x="258" y="562">exit latency matters</text>
+
+    <rect x="520" y="470" width="270" height="120" rx="24" fill="#effdf6" stroke="#b7ebcf"/>
+    <text x="595" y="530">CPUFreq /</text>
+    <text x="560" y="562">schedutil response</text>
+
+    <rect x="820" y="470" width="320" height="120" rx="24" fill="#fef3c7" stroke="#f59e0b"/>
+    <text x="877" y="530">userspace resumes</text>
+    <text x="873" y="562">parse -> decide -> wait</text>
+  </g>
+
+  <g stroke="#52b788" stroke-width="6" fill="none" stroke-linecap="round">
+    <path d="M1085 320 L1085 395 L355 395 L355 470"/>
+    <path d="M1085 320 L1085 395 L655 395 L655 470"/>
+    <path d="M1085 320 L1085 395 L980 395 L980 470"/>
+  </g>
+
+  <g font-family="SF Pro Text, Helvetica, Arial, sans-serif" font-size="21" fill="#475569">
+    <text x="80" y="690">Latency can accumulate across several small components rather than one dominant stall.</text>
+    <text x="80" y="728">This RFC studies whether a short runqueue-level active window can reduce warmup penalties without replacing existing Linux policy.</text>
+  </g>
+</svg>

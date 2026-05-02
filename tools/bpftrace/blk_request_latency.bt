@@ -1,0 +1,22 @@
+#!/usr/bin/env bpftrace
+/*
+ * Measure block request issue to complete latency.
+ * Output format: timestamp,cpu,rq,bytes,op,latency_us
+ */
+
+tracepoint:agent_latency:agent_blk_rq_issue
+{
+    @issue_time[args->rq] = nsecs;
+    @rq_bytes[args->rq] = args->bytes;
+    @rq_op[args->rq] = args->op;
+}
+
+tracepoint:agent_latency:agent_blk_rq_complete
+/@issue_time[args->rq]/
+{
+    $latency = (nsecs - @issue_time[args->rq]) / 1000;
+    printf("%llu,%d,%p,%u,%u,%llu\n", nsecs, args->cpu, args->rq, @rq_bytes[args->rq], @rq_op[args->rq], $latency);
+    delete(@issue_time[args->rq]);
+    delete(@rq_bytes[args->rq]);
+    delete(@rq_op[args->rq]);
+}

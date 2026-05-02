@@ -1,0 +1,26 @@
+#!/usr/bin/env bpftrace
+/*
+ * Correlate the complete I/O path using existing and new tracepoints.
+ * Output format: timestamp,cpu,pid,event,user_data
+ */
+
+tracepoint:agent_latency:agent_io_uring_submit
+{
+    printf("%llu,%d,%d,io_uring_submit,%llu\n", nsecs, args->cpu, args->pid, args->user_data);
+}
+
+tracepoint:agent_latency:agent_blk_rq_issue
+{
+    // step_id is 0 until we implement block request propagation
+    printf("%llu,%d,0,blk_rq_issue,%llu\n", nsecs, args->cpu, args->step_id);
+}
+
+tracepoint:agent_latency:agent_blk_rq_complete
+{
+    printf("%llu,%d,0,blk_rq_complete,%llu\n", nsecs, args->cpu, args->step_id);
+}
+
+tracepoint:agent_latency:agent_io_uring_complete
+{
+    printf("%llu,%d,%d,io_uring_complete,%llu\n", nsecs, args->cpu, args->pid, args->user_data);
+}

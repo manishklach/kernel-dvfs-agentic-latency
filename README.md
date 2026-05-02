@@ -26,6 +26,10 @@ Agent-visible latency isn't just direct hardware IRQs. Often, completion logic i
 `IRQ/Timer → Workqueue/SoftIRQ → Wakeup → Scheduler → DVFS → cpuidle → Userspace`
 
 To address this, our research extends latency attribution into deferred contexts. We track delays caused by `kworker` threads executing deferred I/O and `hrtimer` callbacks in SoftIRQ context. If a `kworker` is processing an agent's completion, it must inherit the agent's latency guard to rush the wakeup. (See [docs/deferred-completion-paths.md](docs/deferred-completion-paths.md) for details).
+
+## I/O and blk-mq Attribution
+
+Agent loops frequently block on local storage and async I/O. This repo now includes RFC tracepoints and bpftrace tools to measure io_uring submit/complete and blk-mq request issue/complete latency.
 ## What This Repo Does
 This is **not** a generic AI repo. This is **not** a "performance tuning" guide. This is a cross-subsystem Linux kernel research project exploring a new scheduler abstraction that spans 4 kernel subsystems:
 

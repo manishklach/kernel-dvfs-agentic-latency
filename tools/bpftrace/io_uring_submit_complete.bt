@@ -1,0 +1,18 @@
+#!/usr/bin/env bpftrace
+/*
+ * Measure io_uring submit to complete latency for agent workloads.
+ * Output format: timestamp,cpu,pid,user_data,latency_us
+ */
+
+tracepoint:agent_latency:agent_io_uring_submit
+{
+    @submit_time[args->user_data] = nsecs;
+}
+
+tracepoint:agent_latency:agent_io_uring_complete
+/@submit_time[args->user_data]/
+{
+    $latency = (nsecs - @submit_time[args->user_data]) / 1000;
+    printf("%llu,%d,%d,%llu,%llu\n", nsecs, args->cpu, args->pid, args->user_data, $latency);
+    delete(@submit_time[args->user_data]);
+}

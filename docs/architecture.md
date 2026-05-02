@@ -1,43 +1,52 @@
 # Agent Latency Architecture
 
-## The Agent Loop
-Agentic AI workloads differ fundamentally from traditional server applications. Instead of processing massive batches or handling thousands of concurrent requests, an agentic loop executes tightly coupled sequential steps:
+## The Agentic Control Loop
+Agentic AI workloads execute tight, sequential control loops. Rather than sustaining massive throughput or processing large data batches, they perform repeated cycles of:
 
-1. **Wait**: The agent submits an async request (LLM inference, database query, tool execution) and sleeps (e.g., `epoll_wait`, `io_uring_enter`).
-2. **Wake**: An IRQ signals completion, waking the agent thread.
-3. **Compute**: The agent parses the result, updates its state, and determines the next action.
-4. **Repeat**: The loop starts over.
+1. **Wait**: The agent submits an async request (e.g., LLM inference, vector DB lookup, hardware tool execution) and blocks in `epoll_wait` or `io_uring_enter`.
+2. **Wake**: An IRQ signals completion; the kernel wakes the agent thread.
+3. **Compute**: The agent quickly parses the result, updates its context state, and determines the next action.
+4. **Repeat**: The cycle restarts immediately.
 
-## Kernel Interaction
-When the agent enters the **Wait** phase, the Linux kernel aggressively attempts to save power. Over a gap of even a few milliseconds, the following occurs:
-* **cpuidle**: The CPU transitions from C0 into deeper sleep states (e.g., C3/C6).
-* **DVFS (CPUFreq / schedutil)**: The scheduler utilization signal decays, causing the frequency governor to drop the CPU frequency to its minimum.
-* **Scheduler**: The agent task is removed from the runqueue.
+## Latency Amplification
+Because the "Compute" phase is often fast relative to the "Wait" phase, the CPU routinely drops into deep sleep states or lowers its frequency during the wait.
 
-When the **Wake** phase begins, the kernel must undo all of this:
-* Pay the exit latency to bring the CPU back to C0.
-* Wake the task and place it on a runqueue (often migrating it to a cold CPU to balance load).
-* Slowly ramp the CPU frequency back up as utilization builds.
+This results in a systemic **latency amplification** effect:
+`Latency Penalty = (disk + IRQ + scheduler + DVFS + idle exit) × N steps`
 
-This leads to latency amplification across thousands of steps.
+Over a chain of thousands of iterative reasoning or retrieval steps, these sub-millisecond wakeup penalties compound into massive user-facing delays.
 
-## Why Existing Mechanisms Fail
+## The Kernel Control Path
+To understand the bottleneck, we must analyze the complete wakeup path:
 
-### 1. schedutil (Reactive)
-`schedutil` relies on the PELT (Per-Entity Load Tracking) signal. PELT is explicitly designed as a low-pass filter to smooth out transients. By definition, a short, bursty agent loop will not generate a high sustained utilization signal. `schedutil` is always reacting *after* the compute phase is over.
+`IRQ → wakeup → scheduler → DVFS → cpuidle → userspace`
 
-### 2. uclamp (Static)
-`uclamp` allows userspace to set a static minimum performance floor (`util_min`). However, clamping utilization high prevents the CPU from *ever* saving power, even if the agent is blocked for seconds waiting on an external API. It is energy-blind.
+```text
+ +-----------------------------------------------------------+
+ |                     Userspace Agent                       |
+ |  [ Wait (epoll) ] ---> [ Wake ] ---> [ Compute/Parse ]    |
+ +--------^------------------|------------------|------------+
+          |                  |                  |
+ +--------|------------------v------------------v------------+
+ |                       Kernel Space                        |
+ |                                                           |
+ |  [ IRQ ] -> [ Scheduler Wakeup ] -> [ DVFS / cpuidle ]    |
+ |                                                           |
+ +-----------------------------------------------------------+
+```
 
-### 3. cpuidle (Energy Optimized)
-The cpuidle governor (like `menu` or `teo`) predicts idle duration based on past events. It routinely selects deep C-states for agent waits, prioritizing power over the microsecond-level wake latency required by the loop.
+### 1. IRQ and Wakeup
+* **Linux Today**: When an IRQ fires, `try_to_wake_up()` places the blocked task on a runqueue.
+* **Why it fails**: The kernel does not know the task is part of a tight control loop. It treats this as an isolated event.
 
-## The Patch: A Control Plane for Agents
-This research patch introduces an "agent active window". When a thread marked with `SCHED_FLAG_AGENT_LATENCY` is woken by an IRQ:
+### 2. Scheduler
+* **Linux Today**: The load balancer may migrate the task to an idle (cold) CPU to balance runqueue depth.
+* **Why it fails**: Moving the task discards its L1/L2 cache state. For short compute phases, cache-miss latency outweighs queue-wait latency.
 
-1. **Wakeup Path**: The scheduler immediately opens a short, timestamped window on the runqueue (`rq->agent_active_until_ns`).
-2. **Scheduler**: The load balancer prefers keeping the task on its previous CPU to preserve L1/L2 cache locality, avoiding cold-start migrations.
-3. **DVFS (schedutil)**: If the agent window is active, `schedutil` applies a temporary `util_min` floor, bypassing PELT decay. The frequency ramps instantly.
-4. **cpuidle**: If the agent window is active, the idle governor drops any C-state whose `exit_latency` exceeds the agent's tight budget, keeping the core warm.
+### 3. DVFS (schedutil)
+* **Linux Today**: `schedutil` relies on PELT (Per-Entity Load Tracking) to determine CPU utilization.
+* **Why it fails**: PELT is a low-pass filter. Short bursts of compute following a sleep period produce a low PELT signal. The CPU remains at its minimum frequency during the critical compute phase.
 
-Once the window expires, standard Linux power management resumes safely.
+### 4. cpuidle
+* **Linux Today**: The idle governor (e.g., `menu` or `teo`) predicts sleep duration. Because the agent waits on external API calls, the governor selects deep C-states (C3/C6).
+* **Why it fails**: Deep C-states incur exit latencies of hundreds of microseconds. The agent thread must wait for hardware to physically wake the core before it can even begin execution.

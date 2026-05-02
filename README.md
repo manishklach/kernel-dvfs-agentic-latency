@@ -20,6 +20,12 @@ To understand the bottleneck, we must look at the complete path a wakeup takes. 
 
 `IRQ → wakeup → scheduler → DVFS → cpuidle → userspace`
 
+## Deferred Completion Paths
+Agent-visible latency isn't just direct hardware IRQs. Often, completion logic is deferred:
+
+`IRQ/Timer → Workqueue/SoftIRQ → Wakeup → Scheduler → DVFS → cpuidle → Userspace`
+
+To address this, our research extends latency attribution into deferred contexts. We track delays caused by `kworker` threads executing deferred I/O and `hrtimer` callbacks in SoftIRQ context. If a `kworker` is processing an agent's completion, it must inherit the agent's latency guard to rush the wakeup. (See [docs/deferred-completion-paths.md](docs/deferred-completion-paths.md) for details).
 ## What This Repo Does
 This is **not** a generic AI repo. This is **not** a "performance tuning" guide. This is a cross-subsystem Linux kernel research project exploring a new scheduler abstraction that spans 4 kernel subsystems:
 

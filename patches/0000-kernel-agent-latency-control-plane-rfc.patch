@@ -602,3 +602,39 @@ new file mode 100644
 +                               (unsigned long long)((t1 - t0) / 1000));
 +        }
 +}
++
++/*
++ * RFC Skeleton: Workqueue and Timer Deferred Completion
++ * These chunks demonstrate where agent latency attribution must be extended
++ * into asynchronous execution paths.
++ */
++
++diff --git a/kernel/workqueue.c b/kernel/workqueue.c
++--- a/kernel/workqueue.c
+++++ b/kernel/workqueue.c
++@@ -2340,6 +2340,15 @@ static void process_one_work(struct worker *worker, struct work_struct *work)
++ 
++ 	/*
++ 	 * RFC: If this work_struct is servicing an agentic completion
++	 * (e.g., io_uring polling), the kworker should temporarily inherit
++ 	 * the agent's latency constraints to prevent idle exit latency
++	 * during work processing.
++ 	 */
++ 
++ 	worker->current_work = work;
++ 	worker->current_func = work->func;
++
++diff --git a/kernel/time/hrtimer.c b/kernel/time/hrtimer.c
++--- a/kernel/time/hrtimer.c
+++++ b/kernel/time/hrtimer.c
++@@ -1500,6 +1500,14 @@ static void __run_hrtimer(struct hrtimer_cpu_base *cpu_base,
++ 
++ 	/*
++ 	 * RFC: When arming a timer for an agentic workload, the timer
++	 * subsystem must restrict the allowable C-state based on proximity.
++	 * The cpuidle governor must refuse sleep states whose exit latency
++	 * exceeds the time remaining until the timer expires.
++ 	 */
++ 
++ 	trace_hrtimer_expire_entry(timer, now);
++ 	restart = fn(timer);

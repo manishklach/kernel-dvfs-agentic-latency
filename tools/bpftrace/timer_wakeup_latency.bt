@@ -1,0 +1,24 @@
+#!/usr/bin/env bpftrace
+/*
+ * Trace hrtimer expiry to agent wakeup latency.
+ * Shows delays caused by SoftIRQ and idle exit overhead.
+ */
+
+tracepoint:timer:hrtimer_expire_entry
+{
+    @expire[args->timer] = nsecs;
+}
+
+tracepoint:sched:sched_wakeup
+/args->comm == "agent_loop"/
+{
+    @wake_time[args->pid] = nsecs;
+}
+
+tracepoint:timer:hrtimer_expire_exit
+/@expire[args->timer]/
+{
+    $latency = (nsecs - @expire[args->timer]) / 1000;
+    @timer_callback_duration_us = hist($latency);
+    delete(@expire[args->timer]);
+}

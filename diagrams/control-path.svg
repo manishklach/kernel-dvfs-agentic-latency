@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 200">
+  <defs>
+    <style>
+      .box { fill: #f8fafc; stroke: #334155; stroke-width: 2; rx: 8; }
+      .text { font-family: -apple-system, system-ui, sans-serif; font-size: 14px; fill: #0f172a; text-anchor: middle; font-weight: 500; }
+      .title { font-family: -apple-system, system-ui, sans-serif; font-size: 12px; fill: #64748b; text-anchor: middle; }
+      .arrow { stroke: #3b82f6; stroke-width: 2; fill: none; }
+      .arrowhead { fill: #3b82f6; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" class="arrowhead" />
+    </marker>
+  </defs>
+
+  <rect x="20" y="50" width="100" height="60" class="box" />
+  <text x="70" y="85" class="text">IRQ</text>
+  <text x="70" y="100" class="title">Hardware</text>
+
+  <path d="M 120 80 L 150 80" class="arrow" marker-end="url(#arrow)" />
+
+  <rect x="160" y="50" width="100" height="60" class="box" />
+  <text x="210" y="85" class="text">Wakeup</text>
+  <text x="210" y="100" class="title">try_to_wake_up</text>
+
+  <path d="M 260 80 L 290 80" class="arrow" marker-end="url(#arrow)" />
+
+  <rect x="300" y="50" width="110" height="60" class="box" />
+  <text x="355" y="85" class="text">Scheduler</text>
+  <text x="355" y="100" class="title">Agent Window</text>
+
+  <path d="M 410 80 L 440 80" class="arrow" marker-end="url(#arrow)" />
+
+  <rect x="450" y="50" width="100" height="60" class="box" />
+  <text x="500" y="85" class="text">DVFS</text>
+  <text x="500" y="100" class="title">schedutil min</text>
+
+  <path d="M 550 80 L 580 80" class="arrow" marker-end="url(#arrow)" />
+
+  <rect x="590" y="50" width="100" height="60" class="box" />
+  <text x="640" y="85" class="text">cpuidle</text>
+  <text x="640" y="100" class="title">C-state guard</text>
+</svg>

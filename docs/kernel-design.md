@@ -1,139 +1,57 @@
-# Kernel Design
+# Kernel Design and Patch Breakdown
 
-This document explains the RFC patch series as a systems research design. It is intentionally conservative and builds on existing kernel mechanisms rather than inventing a parallel scheduler or power-management subsystem.
+This document details the internal mechanics of `0000-kernel-agent-latency-control-plane-rfc.patch`.
 
-## CONFIG_AGENT_LATENCY
+## Foundation
+This patch does not invent a new frequency governor or scheduler class. It cleanly extends existing subsystems:
+* **CPUFreq & schedutil**: Hooks into the utilization calculation rather than writing raw hardware registers.
+* **uclamp**: Complements uclamp's static hints with a dynamic, moving window.
+* **Scheduler**: Integrates directly into `try_to_wake_up()` and `select_task_rq_fair()`.
 
-`CONFIG_AGENT_LATENCY` is the compile-time gate for the experiment.
+## Data Structures
 
-- Location: `kernel/sched/Kconfig`
-- Dependency: `CPU_FREQ_GOV_SCHEDUTIL`
-- Intent: keep the feature clearly optional and easy to disable
-- Status: research-only
+### `SCHED_FLAG_AGENT_LATENCY`
+A new userspace-facing flag added to `include/uapi/linux/sched.h`. Tasks opt-in by setting this flag via `sched_setattr(2)`.
 
-At a high level, the Kconfig option enables task metadata, runqueue metadata, a schedutil boost hook, a cpuidle guard, and a few tracepoints for instrumentation.
-
-## SCHED_FLAG_AGENT_LATENCY
-
-`SCHED_FLAG_AGENT_LATENCY` is the userspace-visible opt-in hint.
-
-- Location: `include/uapi/linux/sched.h`
-- Intended use: normal tasks that participate in bursty agent control loops
-- Explicit non-goal: stacking the hint onto RT or deadline classes in this RFC
-
-The patch uses the flag as an admission point for default agent metadata. A more complete design would likely need stronger policy controls and perhaps cgroup-level governance.
-
-## task_struct Metadata
-
-The RFC adds experimental fields to `task_struct`:
-
-- `agent_window_ns`
-- `agent_min_util`
-- `agent_id`
-- `agent_step_id`
-
-Purpose of each field:
-
-- `agent_window_ns`: duration of the short active window after relevant wakeups
-- `agent_min_util`: minimum effective utilization exposed to `schedutil` during the active window
-- `agent_id`: optional attribution field for tracing multi-agent experiments
-- `agent_step_id`: optional per-step sequence number for timeline correlation
-
-These are deliberately small and do not yet define a complete policy model.
-
-## rq Metadata
-
-The RFC adds experimental fields to `struct rq`:
-
-- `agent_active_until_ns`
-- `agent_min_util`
-- `agent_home_cpu`
-
-Purpose of each field:
-
-- `agent_active_until_ns`: deadline for the active window on the runqueue
-- `agent_min_util`: runqueue-local effective minimum util during the active window
-- `agent_home_cpu`: placeholder for locality-oriented heuristics and future placement work
-
-The current design is runqueue-scoped because the desired effect is local to the CPU that may otherwise downscale or enter deeper idle.
-
-## schedutil Hook
-
-The patch adds a small schedutil helper:
-
-- `agent_boost_util()` in design terms
-- named `agent_latency_boost_util()` in the current RFC patch
-
-Behavior:
-
-1. Read current runqueue state.
-2. Check whether `agent_active_until_ns > now`.
-3. If active, raise effective util to at least `agent_min_util`.
-4. Clamp to the governor's `max`.
-5. Emit a tracepoint if the value actually changed.
-
-This keeps the design aligned with the existing CPUFreq core/governor/driver model. The patch does not replace governor decisions; it only biases the utilization input during a short window.
-
-## cpuidle Guard
-
-The cpuidle side is intentionally simple. During an active agent window, the patch avoids deep idle states whose `exit_latency` exceeds `AGENT_IDLE_EXIT_LIMIT_US`.
-
-Design intent:
-
-- Preserve shallow-idle behavior where possible
-- Avoid obviously expensive idle exits during an expected near-future agent wakeup
-- Keep the mechanism bounded and measurable
-
-This is not a new cpuidle governor. It is a small guard layered onto existing cpuidle behavior.
-
-## Wakeup Path
-
-The RFC refreshes the runqueue's active window on task wakeup. Conceptually:
-
-```text
-agent task wakes
--> scheduler observes agent flag
--> runqueue active window extended
--> schedutil sees temporary min-util floor
--> cpuidle guard can reject overly deep idle states
+### `task_struct` Additions
+```c
+u64 agent_window_ns;
+unsigned int agent_min_util;
+u32 agent_id;
+u64 agent_step_id;
 ```
+Tasks carry their requested window duration and utilization floor. The ID fields exist purely for eBPF observability and correlation.
 
-The current patch places this in the normal wakeup path, which is why rebasing against a real kernel tree matters: locking, helper names, and exact wakeup flow differ by version.
+### `rq` (Runqueue) Additions
+```c
+u64 agent_active_until_ns;
+unsigned int agent_min_util;
+```
+The runqueue holds the actual active window state. This ensures that `schedutil` (which operates on a per-CPU basis) can observe the agent requirement instantly, without walking task lists.
 
-## Tracepoints
+## Hook Implementation
 
-The RFC defines three dedicated tracepoints:
+### 1. The IRQ Refresh Concept
+In `core.c:try_to_wake_up()`, when an agent task is woken, we execute:
+```c
+task_agent_refresh_window(rq, p);
+```
+This updates `rq->agent_active_until_ns = ktime_get_ns() + p->agent_window_ns`. 
+By doing this in the wake path (which is often within the hard/soft IRQ context of a completion), we arm the CPU *before* the context switch even happens.
 
-- `agent_window_refresh`
-- `agent_schedutil_boost`
-- `agent_cpuidle_guard`
+### 2. The schedutil Hook
+In `cpufreq_schedutil.c:sugov_update_single_freq()`, we filter the raw PELT utilization:
+```c
+util = agent_latency_boost_util(sg_cpu, util, max);
+```
+If the runqueue's agent window is active, `util` is boosted to `agent_min_util`. The governor then selects a high frequency immediately.
 
-These are important because the patch should be judged by trace evidence, not intuition. They let you correlate:
-
-- when the active window was refreshed
-- whether schedutil util was actually boosted
-- whether cpuidle selection was constrained
-
-## Selftest
-
-The patch ships a minimal selftest built around an `eventfd` + `epoll` loop.
-
-High-level behavior:
-
-- Producer thread signals an `eventfd` periodically.
-- Main thread blocks in `epoll_wait()`.
-- Wakeup returns through the scheduler path.
-- Main thread performs a small CPU parse loop.
-- Test repeats for many short steps.
-
-This is not intended to be a full agent runtime. It is a controlled latency probe for the wait-wakeup-run pattern.
-
-## Existing Linux Mechanisms This Builds On
-
-- CPUFreq core/governor/driver model
-- `schedutil` governor
-- `uclamp` as an existing performance-hint mechanism
-- cpuidle governors and idle-state metadata
-- scheduler wakeup path and fair scheduling
-
-The project is best understood as a thin experimental layer across these mechanisms, not a competing subsystem.
+### 3. The cpuidle Guard
+In `drivers/cpuidle/cpuidle.c:cpuidle_enter_state()`, we evaluate the selected idle state:
+```c
+if (rq_agent_window_active(rq, now)) {
+    while (index > 0 && drv->states[index].exit_latency > AGENT_LATENCY_IDLE_EXIT_LIMIT_US)
+        index--;
+}
+```
+If the governor chose C6 (exit latency: 800us) but the limit is 50us, we walk backwards until we find C1 or C0, ensuring lightning-fast wakeups.

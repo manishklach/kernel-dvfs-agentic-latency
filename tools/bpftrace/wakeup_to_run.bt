@@ -1,38 +1,19 @@
 #!/usr/bin/env bpftrace
-
 /*
- * Measure wakeup-to-run latency for the standalone selftest process named
- * "agent_loop". This traces:
- *   sched_wakeup: record wake timestamp by target pid
- *   sched_switch: when the target actually gets CPU time, emit latency
- *
- * Output format:
- *   WAKE ts_ns=<switch_ts> pid=<pid> cpu=<cpu> comm=<comm> wakeup_to_run_us=<us>
+ * Measure wakeup-to-run latency for agent_loop.
+ * Shows scheduler latency amplification.
  */
-
-BEGIN
-{
-  printf("Tracing sched wakeup-to-run latency for comm=agent_loop. Press Ctrl-C to stop.\n");
-}
 
 tracepoint:sched:sched_wakeup
 /args->comm == "agent_loop"/
 {
-  @wake_ts[args->pid] = nsecs;
-  @wake_comm[args->pid] = str(args->comm);
+    @wake[args->pid] = nsecs;
 }
 
 tracepoint:sched:sched_switch
-/args->next_comm == "agent_loop"/
+/args->next_comm == "agent_loop" && @wake[args->next_pid]/
 {
-  $pid = args->next_pid;
-  $wake = @wake_ts[$pid];
-
-  if ($wake) {
-    $delta = (nsecs - $wake) / 1000;
-    printf("WAKE ts_ns=%llu pid=%d cpu=%d comm=%s wakeup_to_run_us=%llu\n",
-           nsecs, $pid, cpu, str(@wake_comm[$pid]), $delta);
-    delete(@wake_ts[$pid]);
-    delete(@wake_comm[$pid]);
-  }
+    $latency = (nsecs - @wake[args->next_pid]) / 1000;
+    @latency_us = hist($latency);
+    delete(@wake[args->next_pid]);
 }

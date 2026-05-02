@@ -1,0 +1,18 @@
+#!/usr/bin/env bpftrace
+/*
+ * Measure application-perceived epoll_wait latency.
+ */
+
+tracepoint:syscalls:sys_enter_epoll_wait
+/comm == "agent_loop"/
+{
+    @epoll_entry[tid] = nsecs;
+}
+
+tracepoint:syscalls:sys_exit_epoll_wait
+/comm == "agent_loop" && @epoll_entry[tid]/
+{
+    $latency = (nsecs - @epoll_entry[tid]) / 1000;
+    @epoll_latency_us = hist($latency);
+    delete(@epoll_entry[tid]);
+}

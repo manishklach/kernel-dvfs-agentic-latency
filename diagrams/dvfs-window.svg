@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 300">
+  <defs>
+    <style>
+      .axis { stroke: #94a3b8; stroke-width: 2; }
+      .line { stroke: #ef4444; stroke-width: 2; fill: none; stroke-dasharray: 4; }
+      .agent-line { stroke: #22c55e; stroke-width: 3; fill: none; }
+      .text { font-family: -apple-system, system-ui, sans-serif; font-size: 12px; fill: #475569; }
+      .title { font-family: -apple-system, system-ui, sans-serif; font-size: 14px; fill: #0f172a; font-weight: 600; }
+      .window { fill: #dcfce7; opacity: 0.5; }
+    </style>
+  </defs>
+
+  <!-- Default schedutil -->
+  <text x="400" y="30" class="title" text-anchor="middle">CPU Frequency vs Time</text>
+
+  <line x1="50" y1="250" x2="750" y2="250" class="axis" />
+  <line x1="50" y1="50" x2="50" y2="250" class="axis" />
+
+  <text x="20" y="60" class="text">Max</text>
+  <text x="20" y="250" class="text">Min</text>
+
+  <!-- Windows -->
+  <rect x="100" y="50" width="150" height="200" class="window" />
+  <text x="175" y="270" class="text" text-anchor="middle">Agent Window 1</text>
+
+  <rect x="400" y="50" width="150" height="200" class="window" />
+  <text x="475" y="270" class="text" text-anchor="middle">Agent Window 2</text>
+
+  <!-- Default behavior (Red dashed) -->
+  <path d="M 50 250 L 100 250 L 150 100 L 200 250 L 250 250 L 400 250 L 450 100 L 500 250 L 700 250" class="line" />
+  <text x="650" y="235" class="text" style="fill: #ef4444;">Default (PELT Decay)</text>
+
+  <!-- Agent behavior (Green solid) -->
+  <path d="M 50 250 L 100 80 L 250 80 L 300 250 L 400 250 L 400 80 L 550 80 L 600 250 L 700 250" class="agent-line" />
+  <text x="600" y="70" class="text" style="fill: #22c55e;">Agent Window (Guarded)</text>
+
+</svg>

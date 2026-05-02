@@ -1,97 +1,43 @@
-# Architecture Overview
+# Agent Latency Architecture
 
-This project studies a narrow but increasingly common control path: an agent waits for an external completion, wakes briefly, performs a small amount of CPU work, then waits again. The working hypothesis is that modern ARM/Linux power-management policies can add repeated latency to that pattern because the machine is optimized for average utilization, not for repeated sub-millisecond decision steps.
+## The Agent Loop
+Agentic AI workloads differ fundamentally from traditional server applications. Instead of processing massive batches or handling thousands of concurrent requests, an agentic loop executes tightly coupled sequential steps:
 
-## Core Model
+1. **Wait**: The agent submits an async request (LLM inference, database query, tool execution) and sleeps (e.g., `epoll_wait`, `io_uring_enter`).
+2. **Wake**: An IRQ signals completion, waking the agent thread.
+3. **Compute**: The agent parses the result, updates its state, and determines the next action.
+4. **Repeat**: The loop starts over.
 
-Agent loop:
+## Kernel Interaction
+When the agent enters the **Wait** phase, the Linux kernel aggressively attempts to save power. Over a gap of even a few milliseconds, the following occurs:
+* **cpuidle**: The CPU transitions from C0 into deeper sleep states (e.g., C3/C6).
+* **DVFS (CPUFreq / schedutil)**: The scheduler utilization signal decays, causing the frequency governor to drop the CPU frequency to its minimum.
+* **Scheduler**: The agent task is removed from the runqueue.
 
-```text
-issue tool call / disk read / local RPC
-wait in epoll_wait() or io_uring_enter()
-completion arrives through IRQ / softirq / blk-mq / timer
-agent wakes
-parse result
-decide next step
-repeat
-```
+When the **Wake** phase begins, the kernel must undo all of this:
+* Pay the exit latency to bring the CPU back to C0.
+* Wake the task and place it on a runqueue (often migrating it to a cold CPU to balance load).
+* Slowly ramp the CPU frequency back up as utilization builds.
 
-This repository is concerned with the latency of the wait-to-run transition, not with language-model token generation throughput.
+This leads to latency amplification across thousands of steps.
 
-## Why The Path Matters
+## Why Existing Mechanisms Fail
 
-If the CPU has downscaled frequency or entered a deep idle state during the wait, the next step can inherit extra delay before userspace meaningfully resumes. For a single step that delay may be small. Across many steps it can dominate wall-clock completion time.
+### 1. schedutil (Reactive)
+`schedutil` relies on the PELT (Per-Entity Load Tracking) signal. PELT is explicitly designed as a low-pass filter to smooth out transients. By definition, a short, bursty agent loop will not generate a high sustained utilization signal. `schedutil` is always reacting *after* the compute phase is over.
 
-### Latency Amplification
+### 2. uclamp (Static)
+`uclamp` allows userspace to set a static minimum performance floor (`util_min`). However, clamping utilization high prevents the CPU from *ever* saving power, even if the agent is blocked for seconds waiting on an external API. It is energy-blind.
 
-Per-step delay:
+### 3. cpuidle (Energy Optimized)
+The cpuidle governor (like `menu` or `teo`) predicts idle duration based on past events. It routinely selects deep C-states for agent waits, prioritizing power over the microsecond-level wake latency required by the loop.
 
-```text
-IRQ/completion handling
-+ softirq or blk-mq completion
-+ wakeup-to-run latency
-+ cpuidle exit latency
-+ CPUFreq ramp latency
-+ userspace gate return
-```
+## The Patch: A Control Plane for Agents
+This research patch introduces an "agent active window". When a thread marked with `SCHED_FLAG_AGENT_LATENCY` is woken by an IRQ:
 
-Total delay:
+1. **Wakeup Path**: The scheduler immediately opens a short, timestamped window on the runqueue (`rq->agent_active_until_ns`).
+2. **Scheduler**: The load balancer prefers keeping the task on its previous CPU to preserve L1/L2 cache locality, avoiding cold-start migrations.
+3. **DVFS (schedutil)**: If the agent window is active, `schedutil` applies a temporary `util_min` floor, bypassing PELT decay. The frequency ramps instantly.
+4. **cpuidle**: If the agent window is active, the idle governor drops any C-state whose `exit_latency` exceeds the agent's tight budget, keeping the core warm.
 
-```text
-total delay = per-step delay * number_of_steps
-```
-
-For agentic loops, the multiplication factor can be large even when each individual penalty is modest.
-
-## End-To-End Path
-
-```text
-userspace agent step
-    |
-    | issue async work
-    v
-epoll_wait() / io_uring_enter()
-    |
-    | sleep
-    v
-device completion / timer / network IRQ
-    |
-    v
-IRQ handler -> softirq / blk-mq completion
-    |
-    v
-task wakeup -> scheduler CPU selection
-    |
-    +--> cpuidle exit from selected CPU
-    |
-    +--> schedutil / cpufreq picks next performance point
-    |
-    v
-userspace resumes -> parse -> decide -> next wait
-```
-
-## Research Hypothesis
-
-The patch explores whether a short "agent active window" can reduce repeated warmup costs without pinning the system into permanently high performance. The idea is deliberately modest:
-
-- Do not replace scheduler policy.
-- Do not bypass CPUFreq or cpuidle.
-- Do not assume all interactive tasks are agentic.
-- Do keep performance warm briefly after a relevant wakeup.
-
-## Diagram References
-
-- [Agent DVFS window diagram](../diagrams/agent-dvfs-window.svg)
-- [IRQ to scheduler to DVFS path diagram](../diagrams/irq-scheduler-dvfs-path.svg)
-
-## Conceptual Timing View
-
-```text
-baseline:
-  wait -> idle/downscale -> completion -> wakeup -> ramp/exit -> run
-
-proposed:
-  wait -> keep short active window -> completion -> wakeup -> run sooner
-```
-
-The goal is not to eliminate all latency. It is to reduce repeated warmup penalties when the workload shape strongly suggests another short agent step is imminent.
+Once the window expires, standard Linux power management resumes safely.

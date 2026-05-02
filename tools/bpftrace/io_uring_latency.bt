@@ -1,0 +1,18 @@
+#!/usr/bin/env bpftrace
+/*
+ * Measure application-perceived io_uring_enter latency.
+ */
+
+tracepoint:syscalls:sys_enter_io_uring_enter
+/comm == "agent_loop"/
+{
+    @iouring_entry[tid] = nsecs;
+}
+
+tracepoint:syscalls:sys_exit_io_uring_enter
+/comm == "agent_loop" && @iouring_entry[tid]/
+{
+    $latency = (nsecs - @iouring_entry[tid]) / 1000;
+    @iouring_latency_us = hist($latency);
+    delete(@iouring_entry[tid]);
+}

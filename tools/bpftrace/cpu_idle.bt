@@ -1,22 +1,14 @@
 #!/usr/bin/env bpftrace
-
 /*
- * Log CPU idle-state transitions in a parse-friendly format.
- *
- * Common conventions:
- *   state >= 0  : entering idle state index
- *   state == -1 : exit from idle on many kernels
- *
- * Output format:
- *   IDLE ts_ns=<nsecs> cpu=<cpu> state=<state>
+ * Trace cpuidle state transitions for agent_loop.
+ * Shows deep C-state avoidance.
  */
-
-BEGIN
-{
-  printf("Tracing power:cpu_idle. Press Ctrl-C to stop.\n");
-}
 
 tracepoint:power:cpu_idle
 {
-  printf("IDLE ts_ns=%llu cpu=%d state=%d\n", nsecs, args->cpu_id, args->state);
+    // state 4294967295 (-1) means exiting idle
+    if (comm == "agent_loop" && args->state != 4294967295) {
+        printf("[%llu] CPU %d entering C-state %u\n",
+               nsecs, args->cpu_id, args->state);
+    }
 }

@@ -1,30 +1,30 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Manish KL <manish@example.com>
 Date: Sat, 2 May 2026 00:00:00 +0530
-Subject: [RFC PATCH 1/1] io_uring/blk-mq: add agent latency I/O attribution
+Subject: [RFC PATCH v2] io_uring/blk-mq: add agent latency I/O attribution
 
 Agentic workloads often gate tight control loops on small random I/O,
 local vector DB index reads, or other async completions via io_uring.
 This patch extends the agent latency control plane to track the complete
 I/O submission and completion path.
 
+Changes in v2:
+- Decode step_id and local_request_id from io_uring user_data.
+- Trace io_uring completions based on step_id presence rather than task flag.
+- Pass bytes and op explicitly to blk-mq tracepoints for better safety.
+- Explicitly mark blk-mq step_id as 0 for future propagation work.
+
 This RFC introduces tracepoints for io_uring submit/complete and
 blk-mq issue/complete. It does not alter ABI or struct request size.
 Instead, it relies on userspace encoding an agent_step_id within the
 io_uring user_data field.
 
-Patch layout:
-  [1/4] io_uring: add agent latency tracepoints for submit/complete
-  [2/4] block: add agent latency tracepoints for blk-mq issue/complete
-  [3/4] docs: add io-block-attribution documentation
-  [4/4] tools: add bpftrace scripts for io_uring and block latency
-
 ---
  include/linux/sched/agent_latency.h  |  8 +++
- include/trace/events/agent_latency.h | 80 ++++++++++++++++++++++++++++
- block/blk-mq.c                       | 22 ++++++++
- io_uring/io_uring.c                  | 18 +++++++
- 4 files changed, 128 insertions(+)
+ include/trace/events/agent_latency.h | 95 ++++++++++++++++++++++++++++
+ block/blk-mq.c                       | 24 ++++++++
+ io_uring/io_uring.c                  | 21 +++++++
+ 4 files changed, 148 insertions(+)
 
 diff --git a/include/linux/sched/agent_latency.h b/include/linux/sched/agent_latency.h
 --- a/include/linux/sched/agent_latency.h
@@ -45,7 +45,7 @@ diff --git a/include/linux/sched/agent_latency.h b/include/linux/sched/agent_lat
 diff --git a/include/trace/events/agent_latency.h b/include/trace/events/agent_latency.h
 --- a/include/trace/events/agent_latency.h
 +++ b/include/trace/events/agent_latency.h
-@@ -161,6 +161,86 @@ TRACE_EVENT(agent_completion_to_wakeup,
+@@ -161,6 +161,101 @@ TRACE_EVENT(agent_completion_to_wakeup,
          TP_printk("cpu=%d obj=%p woke_pid=%d", __entry->cpu, __entry->obj, __entry->pid)
  );
  
@@ -56,16 +56,20 @@ diff --git a/include/trace/events/agent_latency.h b/include/trace/events/agent_l
 +                __field(int, cpu)
 +                __field(pid_t, pid)
 +                __field(u64, user_data)
++                __field(u64, step_id)
++                __field(u32, req_id)
 +                __field(u8, opcode)
 +        ),
 +        TP_fast_assign(
 +                __entry->cpu = smp_processor_id();
 +                __entry->pid = current->pid;
 +                __entry->user_data = user_data;
++                __entry->step_id = user_data >> 32;
++                __entry->req_id = (u32)(user_data & 0xFFFFFFFF);
 +                __entry->opcode = opcode;
 +        ),
-+        TP_printk("cpu=%d pid=%d user_data=%llu opcode=%u",
-+                  __entry->cpu, __entry->pid, __entry->user_data, __entry->opcode)
++        TP_printk("cpu=%d pid=%d step_id=%llu req_id=%u opcode=%u",
++                  __entry->cpu, __entry->pid, __entry->step_id, __entry->req_id, __entry->opcode)
 +);
 +
 +TRACE_EVENT(agent_io_uring_complete,
@@ -75,21 +79,25 @@ diff --git a/include/trace/events/agent_latency.h b/include/trace/events/agent_l
 +                __field(int, cpu)
 +                __field(pid_t, pid)
 +                __field(u64, user_data)
++                __field(u64, step_id)
++                __field(u32, req_id)
 +                __field(int, res)
 +        ),
 +        TP_fast_assign(
 +                __entry->cpu = smp_processor_id();
 +                __entry->pid = current->pid;
 +                __entry->user_data = user_data;
++                __entry->step_id = user_data >> 32;
++                __entry->req_id = (u32)(user_data & 0xFFFFFFFF);
 +                __entry->res = res;
 +        ),
-+        TP_printk("cpu=%d pid=%d user_data=%llu res=%d",
-+                  __entry->cpu, __entry->pid, __entry->user_data, __entry->res)
++        TP_printk("cpu=%d pid=%d step_id=%llu req_id=%u res=%d",
++                  __entry->cpu, __entry->pid, __entry->step_id, __entry->req_id, __entry->res)
 +);
 +
 +TRACE_EVENT(agent_blk_rq_issue,
-+        TP_PROTO(struct request *rq),
-+        TP_ARGS(rq),
++        TP_PROTO(struct request *rq, unsigned int bytes, unsigned int op),
++        TP_ARGS(rq, bytes, op),
 +        TP_STRUCT__entry(
 +                __field(int, cpu)
 +                __field(void *, rq)
@@ -100,9 +108,9 @@ diff --git a/include/trace/events/agent_latency.h b/include/trace/events/agent_l
 +        TP_fast_assign(
 +                __entry->cpu = smp_processor_id();
 +                __entry->rq = rq;
-+                __entry->step_id = 0; /* TODO: propagate from io_uring */
-+                __entry->bytes = blk_rq_bytes(rq);
-+                __entry->op = req_op(rq);
++                __entry->step_id = 0; /* TODO: propagate from io_uring SQE */
++                __entry->bytes = bytes;
++                __entry->op = op;
 +        ),
 +        TP_printk("cpu=%d rq=%p step_id=%llu bytes=%u op=%u",
 +                  __entry->cpu, __entry->rq, __entry->step_id,
@@ -110,22 +118,24 @@ diff --git a/include/trace/events/agent_latency.h b/include/trace/events/agent_l
 +);
 +
 +TRACE_EVENT(agent_blk_rq_complete,
-+        TP_PROTO(struct request *rq, int error),
-+        TP_ARGS(rq, error),
++        TP_PROTO(struct request *rq, int error, unsigned int bytes),
++        TP_ARGS(rq, error, bytes),
 +        TP_STRUCT__entry(
 +                __field(int, cpu)
 +                __field(void *, rq)
 +                __field(u64, step_id)
 +                __field(int, error)
++                __field(unsigned int, bytes)
 +        ),
 +        TP_fast_assign(
 +                __entry->cpu = smp_processor_id();
 +                __entry->rq = rq;
-+                __entry->step_id = 0; /* TODO: propagate from io_uring */
++                __entry->step_id = 0; /* TODO: propagate from io_uring SQE */
 +                __entry->error = error;
++                __entry->bytes = bytes;
 +        ),
-+        TP_printk("cpu=%d rq=%p step_id=%llu error=%d",
-+                  __entry->cpu, __entry->rq, __entry->step_id, __entry->error)
++        TP_printk("cpu=%d rq=%p step_id=%llu error=%d bytes=%u",
++                  __entry->cpu, __entry->rq, __entry->step_id, __entry->error, __entry->bytes)
 +);
 +
  #endif
@@ -141,13 +151,16 @@ diff --git a/io_uring/io_uring.c b/io_uring/io_uring.c
 +#include <trace/events/agent_latency.h>
 +#endif
 +
-@@ -1000,6 +1005,12 @@ static inline void io_req_complete_post(struct io_kiocb *req, s32 res,
+@@ -1000,6 +1005,15 @@ static inline void io_req_complete_post(struct io_kiocb *req, s32 res,
  {
          struct io_ring_ctx *ctx = req->ctx;
  
 +#ifdef CONFIG_AGENT_LATENCY
-+        /* RFC: trace io_uring completion. user_data can encode agent_step_id. */
-+        if (task_agent_latency(current))
++        /* 
++         * RFC: trace io_uring completion. 
++         * We trace if step_id is present in user_data, even if current context isn't the agent.
++         */
++        if (agent_step_from_user_data(req->cqe.user_data) != 0)
 +                trace_agent_io_uring_complete(req->cqe.user_data, res);
 +#endif
 +
@@ -159,7 +172,7 @@ diff --git a/io_uring/io_uring.c b/io_uring/io_uring.c
                          break;
  
 +#ifdef CONFIG_AGENT_LATENCY
-+                /* RFC: trace io_uring submission */
++                /* RFC: trace io_uring submission if current task is an agent */
 +                if (task_agent_latency(current))
 +                        trace_agent_io_uring_submit(sqe->user_data,
 +                                                    sqe->opcode);
@@ -180,13 +193,17 @@ diff --git a/block/blk-mq.c b/block/blk-mq.c
 +#include <trace/events/agent_latency.h>
 +#endif
 +
-@@ -800,6 +805,12 @@ bool blk_update_request(struct request *req, blk_status_t error,
+@@ -800,6 +805,16 @@ bool blk_update_request(struct request *req, blk_status_t error,
          struct bio *bio = req->bio;
          unsigned int nr_bytes = blk_rq_bytes(req);
  
 +#ifdef CONFIG_AGENT_LATENCY
-+        /* RFC: trace blk-mq completion. step_id currently 0. */
-+        trace_agent_blk_rq_complete(req, error);
++        /* 
++         * RFC: trace blk-mq completion. 
++         * step_id currently 0 (indirect correlation only).
++         * Note: blk_update_request may observe partial completions.
++         */
++        trace_agent_blk_rq_complete(req, (int)error, nr_bytes);
 +#endif
 +
          /* ... */
@@ -199,11 +216,11 @@ diff --git a/block/blk-mq.c b/block/blk-mq.c
 +#ifdef CONFIG_AGENT_LATENCY
 +        /* 
 +         * RFC: trace blk-mq issue. 
++         * Pass bytes and op explicitly to avoid tracepoint header include issues.
 +         * TODO: propagate agent_step_id from io_uring SQE user_data 
-+         * into blk request metadata so we can correlate completion 
-+         * back to the specific agent step without relying on time.
++         * into blk request metadata (v3) for end-to-end correlation.
 +         */
-+        trace_agent_blk_rq_issue(rq);
++        trace_agent_blk_rq_issue(rq, blk_rq_bytes(rq), req_op(rq));
 +#endif
 +
          /* ... */

@@ -2,6 +2,8 @@
 /*
  * Measure block request issue to complete latency.
  * Output format: timestamp,cpu,rq,bytes,op,latency_us
+ * 
+ * CSV Header: timestamp,cpu,rq,bytes,op,latency_us
  */
 
 tracepoint:agent_latency:agent_blk_rq_issue
@@ -15,8 +17,13 @@ tracepoint:agent_latency:agent_blk_rq_complete
 /@issue_time[args->rq]/
 {
     $latency = (nsecs - @issue_time[args->rq]) / 1000;
-    printf("%llu,%d,%p,%u,%u,%llu\n", nsecs, args->cpu, args->rq, @rq_bytes[args->rq], @rq_op[args->rq], $latency);
+    printf("%llu,%d,%p,%u,%u,%llu\n", nsecs, args->cpu, args->rq, args->bytes, @rq_op[args->rq], $latency);
     delete(@issue_time[args->rq]);
     delete(@rq_bytes[args->rq]);
     delete(@rq_op[args->rq]);
 }
+
+/* Fallback for unpatched kernels:
+ * tracepoint:block:block_rq_issue { ... }
+ * tracepoint:block:block_rq_complete { ... }
+ */

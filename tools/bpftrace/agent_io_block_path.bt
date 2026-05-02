@@ -1,26 +1,32 @@
 #!/usr/bin/env bpftrace
 /*
- * Correlate the complete I/O path using existing and new tracepoints.
- * Output format: timestamp,cpu,pid,event,user_data
+ * Correlate the complete I/O path using agent-latency tracepoints.
+ * Output format: timestamp,cpu,pid,event,step_id,req_id,val
+ * 
+ * CSV Header: timestamp,cpu,pid,event,step_id,req_id,val
  */
 
 tracepoint:agent_latency:agent_io_uring_submit
 {
-    printf("%llu,%d,%d,io_uring_submit,%llu\n", nsecs, args->cpu, args->pid, args->user_data);
+    printf("%llu,%d,%d,io_uring_submit,%llu,%u,%u\n", nsecs, args->cpu, args->pid, args->step_id, args->req_id, args->opcode);
 }
 
 tracepoint:agent_latency:agent_blk_rq_issue
 {
-    // step_id is 0 until we implement block request propagation
-    printf("%llu,%d,0,blk_rq_issue,%llu\n", nsecs, args->cpu, args->step_id);
+    // step_id is 0 until v3 propagation
+    printf("%llu,%d,0,blk_rq_issue,0,0,%p\n", nsecs, args->cpu, args->rq);
 }
 
 tracepoint:agent_latency:agent_blk_rq_complete
 {
-    printf("%llu,%d,0,blk_rq_complete,%llu\n", nsecs, args->cpu, args->step_id);
+    printf("%llu,%d,0,blk_rq_complete,0,0,%p\n", nsecs, args->cpu, args->rq);
 }
 
 tracepoint:agent_latency:agent_io_uring_complete
 {
-    printf("%llu,%d,%d,io_uring_complete,%llu\n", nsecs, args->cpu, args->pid, args->user_data);
+    printf("%llu,%d,%d,io_uring_complete,%llu,%u,%d\n", nsecs, args->cpu, args->pid, args->step_id, args->req_id, args->res);
 }
+
+/* Fallback for unpatched kernels:
+ * Use block:block_rq_* and io_uring:* (if present)
+ */

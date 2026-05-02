@@ -1,0 +1,18 @@
+#!/usr/bin/env bpftrace
+/*
+ * Trace kworker runtime while servicing agent-attributed work.
+ * Shows how much time the deferred completion blocks the agent.
+ */
+
+tracepoint:agent_latency:agent_workqueue_start
+{
+    @start_time[args->work] = nsecs;
+}
+
+tracepoint:agent_latency:agent_workqueue_finish
+/@start_time[args->work]/
+{
+    $runtime = (nsecs - @start_time[args->work]) / 1000;
+    @kworker_runtime_us = hist($runtime);
+    delete(@start_time[args->work]);
+}

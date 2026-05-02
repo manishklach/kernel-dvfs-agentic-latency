@@ -1,0 +1,17 @@
+#!/usr/bin/env bpftrace
+/*
+ * Trace hrtimer expiry to agent wakeup latency.
+ */
+
+tracepoint:agent_latency:agent_timer_expire
+{
+    @expire_time[args->timer] = nsecs;
+}
+
+tracepoint:agent_latency:agent_timer_wakeup
+/@expire_time[args->timer]/
+{
+    $latency = (nsecs - @expire_time[args->timer]) / 1000;
+    @timer_latency_us = hist($latency);
+    delete(@expire_time[args->timer]);
+}

@@ -1,19 +1,23 @@
 #!/usr/bin/env bpftrace
 /*
- * Trace workqueue deferred latency.
- * Measures the time between work queued and work executed by a kworker.
- * High latency here adds directly to agent wakeup time.
+ * Trace workqueue deferred latency for agentic workloads.
+ * Measures time between work queued and execution start.
  */
 
-tracepoint:workqueue:workqueue_queue_work
+tracepoint:agent_latency:agent_workqueue_queue
 {
     @queue_time[args->work] = nsecs;
 }
 
-tracepoint:workqueue:workqueue_execute_start
+tracepoint:agent_latency:agent_workqueue_start
 /@queue_time[args->work]/
 {
     $latency = (nsecs - @queue_time[args->work]) / 1000;
     @work_latency_us = hist($latency);
     delete(@queue_time[args->work]);
+}
+
+tracepoint:agent_latency:agent_workqueue_finish
+{
+    // Placeholder for execution time constraints
 }
